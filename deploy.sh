@@ -85,7 +85,7 @@ gen_secret() {
 # 行为:
 #   - 若已在仓库目录: 直接返回
 #   - 否则: clone 仓库到 ./codex2api，切入并 exec ./deploy.sh
-REPO_URL="${CODEX2API_REPO_URL:-https://github.com/james-6-23/codex2api.git}"
+REPO_URL="${CODEX2API_REPO_URL:-https://github.com/exynos967/codex2api.git}"
 REPO_BRANCH="${CODEX2API_REPO_BRANCH:-main}"
 REPO_DIR_NAME="${CODEX2API_DIR_NAME:-codex2api}"
 EXISTING_ENV_FILE=".env"

@@ -2,7 +2,7 @@ name: codex2api
 
 services:
   codex2api:
-    image: ghcr.io/james-6-23/codex2api:latest
+    image: ghcr.io/exynos967/codex2api:latest
     container_name: codex2api
     ports:
       - "${BIND_HOST:-0.0.0.0}:${CODEX_PORT:-8080}:${CODEX_PORT:-8080}"

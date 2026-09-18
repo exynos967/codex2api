@@ -2,7 +2,7 @@ name: codex2api-sqlite
 
 services:
   codex2api:
-    image: ghcr.io/james-6-23/codex2api:latest
+    image: ghcr.io/exynos967/codex2api:latest
     container_name: codex2api-sqlite
     ports:
       # Bind to localhost only by default for security.
