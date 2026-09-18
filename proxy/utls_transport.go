@@ -405,12 +405,16 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	// IdleConnTimeout 必须显式设置：NewClientConn 仅在 idleConnTimeout()!=0 时安装
 	// 空闲定时器（closeIfIdle）。缺失时连接永不自动回收，readLoop goroutine 与
 	// socket 常驻，是 issue #446 万级连接/goroutine 泄漏的根因。
-	tr := &http2.Transport{
-		ReadIdleTimeout: codexHTTP2ReadIdleTimeout,
-		PingTimeout:     codexHTTP2PingTimeout,
-		IdleConnTimeout: codexUTLSIdleConnTimeout,
+	//
+	// 前导指纹（SETTINGS/WINDOW_UPDATE）由 NewCodexHTTP2Transport +
+	// WrapCodexH2PrefaceConn 对齐 hyper/h2 默认值，见 auth/h2_transport.go。
+	// 仅 rustls 指纹路径包前导改写；Chrome 路径对应浏览器 H2 前导，另案处理。
+	tr := auth.NewCodexHTTP2Transport(codexHTTP2ReadIdleTimeout, codexHTTP2PingTimeout, codexUTLSIdleConnTimeout)
+	h2ConnTarget := net.Conn(tlsConn)
+	if t.helloSpec != nil {
+		h2ConnTarget = auth.WrapCodexH2PrefaceConn(tlsConn)
 	}
-	h2Conn, err := tr.NewClientConn(tlsConn)
+	h2Conn, err := tr.NewClientConn(h2ConnTarget)
 	if err != nil {
 		tlsConn.Close()
 		return nil, fmt.Errorf("HTTP/2 连接创建失败: %w", err)
