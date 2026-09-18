@@ -1,12 +1,19 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestParseAccountSchedulerUpdateCodexTurnState(t *testing.T) {
@@ -80,5 +87,79 @@ func TestRefineCodexTurnStateSetAt(t *testing.T) {
 	refineCodexTurnStateSetAt(legacy, backfill)
 	if got, _ := backfill.CredentialUpdates[auth.CodexTurnStateSetAtCredentialKey].(string); got == "" {
 		t.Fatal("legacy row without set_at must be backfilled on re-save")
+	}
+}
+
+// TestCodexTurnStateRefreshConfigSaveLifecycle 钉死"保存自动刷新配置 → 刷新生效"
+// 闭环：PATCH 写入凭据后，运行时账号必须立刻能过刷新开关守卫——否则管理端
+// 点了保存却刷不动的坑会反复出现。
+func TestCodexTurnStateRefreshConfigSaveLifecycle(t *testing.T) {
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, nil)
+	t.Cleanup(store.Stop)
+	h := &Handler{db: db, store: store}
+
+	id, err := db.InsertAccountWithCredentials(context.Background(), "codex-a", map[string]interface{}{
+		"upstream_type": auth.UpstreamOpenAIResponses,
+		"access_token":  "test-access-token",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadAccountByID(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+
+	// 只改刷新配置也应算变更（hasChanges 不能把刷新字段漏掉）。
+	update, err := parseAccountSchedulerUpdate(updateAccountSchedulerReq{
+		CodexTurnStateRefreshEnabled: json.RawMessage(`"true"`),
+		CodexTurnStateRefreshProxy:   json.RawMessage(`"socks5h://user:pass@127.0.0.1:1080"`),
+		CodexTurnStateModels:         json.RawMessage(`"gpt-5.5, gpt-5*"`),
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !update.hasChanges() {
+		t.Fatal("refresh-only update must count as changes")
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(id)}}
+	c.Request = httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/accounts/%d/scheduler", id),
+		strings.NewReader(`{
+			"codex_turn_state_refresh_enabled": "true",
+			"codex_turn_state_refresh_proxy": "socks5h://user:pass@127.0.0.1:1080",
+			"codex_turn_state_models": "gpt-5.5, gpt-5*"
+		}`))
+	h.UpdateAccountScheduler(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("保存失败: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 1) 落库
+	row, err := db.GetAccountByID(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := row.GetCredential(auth.CodexTurnStateRefreshEnabledCredentialKey); got != "true" {
+		t.Fatalf("enabled 未落库: %q", got)
+	}
+	if got := row.GetCredential(auth.CodexTurnStateRefreshProxyCredentialKey); got != "socks5h://user:pass@127.0.0.1:1080" {
+		t.Fatalf("proxy 未落库: %q", got)
+	}
+
+	// 2) 运行时同步（刷新守卫读的就是这里）
+	account := store.FindByID(id)
+	if account == nil {
+		t.Fatal("运行时账号不存在")
+	}
+	enabled, proxy := account.CodexTurnStateRefreshConfig()
+	if !enabled || proxy != "socks5h://user:pass@127.0.0.1:1080" {
+		t.Fatalf("运行时未同步: enabled=%v proxy=%q", enabled, proxy)
+	}
+	_, models, _ := account.CodexTurnStateConfig()
+	if models != "gpt-5.5, gpt-5*" {
+		t.Fatalf("模型名单未同步: %q", models)
 	}
 }

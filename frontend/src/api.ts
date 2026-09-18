@@ -881,8 +881,9 @@ export const api = {
   updateAccountScheduler: (id: number, data: UpdateAccountSchedulerRequest) =>
     request<MessageResponse>(`/accounts/${id}/scheduler`, { method: 'PATCH', body: JSON.stringify(data) }),
   // 手动刷新 Turn-State:经探测代理向上游索取正常形态(292) token 并回写;pinned=false 时 error 带原因。
-  refreshCodexTurnState: (id: number) =>
-    request<{ length: number; pinned: boolean; state?: string; error?: string }>(`/accounts/${id}/codex-turn-state/refresh`, { method: 'POST', timeoutMs: 60_000 }),
+  // body 带表单当前值(未保存的改动也生效);空值回落已保存配置。
+  refreshCodexTurnState: (id: number, opts?: { proxy?: string; models?: string }) =>
+    request<{ length: number; pinned: boolean; state?: string; error?: string }>(`/accounts/${id}/codex-turn-state/refresh`, { method: 'POST', body: JSON.stringify(opts ?? {}), timeoutMs: 60_000 }),
   // 设置 OAuth 账号的支持模型白名单;空数组表示清空(该账号可调度所有模型)。返回归一化后的白名单。
   updateAccountModels: (id: number, models: string[]) =>
     request<{ models: string[] }>(`/accounts/${id}/models`, { method: 'PATCH', body: JSON.stringify({ models }) }),

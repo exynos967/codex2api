@@ -191,9 +191,34 @@ func failRefreshResult(err error) (TurnStateRefreshResult, error) {
 	return TurnStateRefreshResult{Error: err.Error()}, err
 }
 
-// RefreshCodexTurnState 对单个账号执行一次探测刷新：成功拿到 292 形态即回写。
-// 并发安全：同一账号同时在途的刷新只有一个。
+// RefreshCodexTurnState 自动刷新入口（周期巡检/反应式触发）：遵守账号开关，
+// 探测参数全部取已保存配置。成功拿到 292 形态即回写。
 func (h *Handler) RefreshCodexTurnState(ctx context.Context, account *auth.Account) (TurnStateRefreshResult, error) {
+	enabled, refreshProxy := account.CodexTurnStateRefreshConfig()
+	if !enabled {
+		return failRefreshResult(fmt.Errorf("账号未开启 turn-state 自动刷新"))
+	}
+	_, models, _ := account.CodexTurnStateConfig()
+	return h.refreshCodexTurnStateWith(ctx, account, refreshProxy, models)
+}
+
+// RefreshCodexTurnStateManual 管理端手动刷新入口：不看开关（点击本身就是授权），
+// 代理与模型名单从请求带入——表单里改了没保存也能用当前值探测，避免
+// "先保存才能刷"的操作陷阱。空值回落到已保存配置。
+func (h *Handler) RefreshCodexTurnStateManual(ctx context.Context, account *auth.Account, proxyOverride, modelsOverride string) (TurnStateRefreshResult, error) {
+	proxyURL := strings.TrimSpace(proxyOverride)
+	if proxyURL == "" {
+		_, proxyURL = account.CodexTurnStateRefreshConfig()
+	}
+	models := strings.TrimSpace(modelsOverride)
+	if models == "" {
+		_, models, _ = account.CodexTurnStateConfig()
+	}
+	return h.refreshCodexTurnStateWith(ctx, account, proxyURL, models)
+}
+
+// refreshCodexTurnStateWith 探测刷新核心。并发安全：同一账号同时在途的刷新只有一个。
+func (h *Handler) refreshCodexTurnStateWith(ctx context.Context, account *auth.Account, refreshProxy, models string) (TurnStateRefreshResult, error) {
 	if h == nil || h.store == nil {
 		return failRefreshResult(fmt.Errorf("handler 未就绪"))
 	}
@@ -214,10 +239,6 @@ func (h *Handler) RefreshCodexTurnState(ctx context.Context, account *auth.Accou
 		r.mu.Unlock()
 	}()
 
-	enabled, refreshProxy := account.CodexTurnStateRefreshConfig()
-	if !enabled {
-		return failRefreshResult(fmt.Errorf("账号未开启 turn-state 自动刷新"))
-	}
 	if account.IsCodexAgentIdentity() {
 		return failRefreshResult(fmt.Errorf("Agent Identity 账号无 access_token，跳过"))
 	}
@@ -231,14 +252,13 @@ func (h *Handler) RefreshCodexTurnState(ctx context.Context, account *auth.Accou
 
 	// 探测模型：注入的模型名单第一个（token 按模型不通用，探测谁就对谁生效）；
 	// 未限定模型时无法确定探测对象，拒绝猜测。
-	_, models, _ := account.CodexTurnStateConfig()
 	model := firstCodexTurnStateModel(models)
 	if model == "" {
 		return failRefreshResult(fmt.Errorf("未配置 codex_turn_state_models 模型名单，无法确定探测对象"))
 	}
 
 	// 探测走专用代理（刷 IP 的意义所在）；未配置时退回账号自身代理。
-	proxyURL := refreshProxy
+	proxyURL := strings.TrimSpace(refreshProxy)
 	if proxyURL == "" {
 		account.Mu().RLock()
 		proxyURL = account.ProxyURL

@@ -2531,6 +2531,8 @@ func (u accountSchedulerUpdate) hasChanges() bool {
 	return u.ScoreBiasOverride.Set ||
 		u.CodexTurnState.Set ||
 		u.CodexTurnStateModels.Set ||
+		u.CodexTurnStateRefreshEnabled.Set ||
+		u.CodexTurnStateRefreshProxy.Set ||
 		u.BaseConcurrencyOverride.Set ||
 		u.SkipWarmTier.Set ||
 		u.AllowedAPIKeyIDs.Set ||

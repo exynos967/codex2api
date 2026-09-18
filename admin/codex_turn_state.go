@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 
@@ -8,8 +9,9 @@ import (
 )
 
 // RefreshCodexTurnState 手动触发某账号的 turn-state 探测刷新（经专用代理换出口
-// IP 拿非降智 token）。周期巡检与降智观测触发之外的第三个入口，方便运维在
-// 换代理节点后立即验证。
+// IP 拿非降智 token）。请求体可带表单当前值 {proxy, models}——手动刷新不看
+// 自动刷新开关（点击本身就是授权），也支持用未保存的表单值直接探测，避免
+// "先保存才能刷"的操作陷阱。
 func (h *Handler) RefreshCodexTurnState(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
@@ -25,7 +27,19 @@ func (h *Handler) RefreshCodexTurnState(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "proxy handler 未就绪"})
 		return
 	}
-	result, err := h.authCacheProxy.RefreshCodexTurnState(c.Request.Context(), account)
+	var body struct {
+		Proxy  string `json:"proxy"`
+		Models string `json:"models"`
+	}
+	// 空体是合法的老调用方式（用已保存配置）。
+	if c.Request.Body != nil {
+		_ = json.NewDecoder(c.Request.Body).Decode(&body)
+	}
+	if err := validateOptionalProxyURL(body.Proxy); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "proxy 无效: " + err.Error()})
+		return
+	}
+	result, err := h.authCacheProxy.RefreshCodexTurnStateManual(c.Request.Context(), account, body.Proxy, body.Models)
 	if err != nil {
 		// 探测失败也返回结构化结果（长度/错误），运维要看的就是它。
 		c.JSON(http.StatusConflict, result)

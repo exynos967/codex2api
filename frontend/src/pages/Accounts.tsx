@@ -2284,12 +2284,16 @@ export default function Accounts() {
   }, [turnStateTtlVisible]);
 
   // 手动刷新 Turn-State:调专用端点经探测代理向上游索取 292(正常)形态 token
-  // 并回写;pinned=false/409 时展示后端返回的降智等原因。
+  // 并回写;pinned=false/409 时展示后端返回的降智等原因。带表单当前值——
+  // 未保存的代理/模型名单改动也直接生效,不要先保存才能刷。
   const handleRefreshCodexTurnState = async () => {
     if (!editingAccount || turnStateRefreshing) return;
     setTurnStateRefreshing(true);
     try {
-      const result = await api.refreshCodexTurnState(editingAccount.id);
+      const result = await api.refreshCodexTurnState(editingAccount.id, {
+        proxy: editCodexTurnStateRefreshProxy.trim(),
+        models: editCodexTurnStateModels.trim(),
+      });
       if (result.pinned) {
         showToast(t("accounts.codexTurnStateRefreshPinned"), "success");
         if (result.state) {
