@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/codex2api/auth"
@@ -30,6 +31,12 @@ func newTurnStateTestHandler(t *testing.T) (*Handler, *auth.Account) {
 // TestCodexTurnStateRefreshClassification 探测结果按形态分类：312 降智拒绝回写、
 // 无 token 报错、292 走到持久化（测试库为空时落库失败但长度判定正确）。
 func TestCodexTurnStateRefreshClassification(t *testing.T) {
+	// 重试循环提速：测试里探测间隔归零、次数收窄。
+	oldDelay := codexTurnStateProbeDelay
+	codexTurnStateProbeDelay = 0
+	defer func() { codexTurnStateProbeDelay = oldDelay }()
+	t.Setenv("CODEX_TURN_STATE_REFRESH_ATTEMPTS", "3")
+
 	good := strings.Repeat("a", auth.CodexTurnStateGoodLength)
 	degraded := strings.Repeat("b", auth.CodexTurnStateDegradedLength)
 
@@ -39,7 +46,7 @@ func TestCodexTurnStateRefreshClassification(t *testing.T) {
 		wantLen    int
 		wantErrSub string
 	}{
-		{"降智312拒绝", degraded, auth.CodexTurnStateDegradedLength, "降智"},
+		{"降智312刷满次数拒绝", degraded, auth.CodexTurnStateDegradedLength, "降智"},
 		{"空token报错", "", 0, "未回传"},
 		{"正常292尝试回写", good, auth.CodexTurnStateGoodLength, "存储未就绪"},
 	}
@@ -70,6 +77,46 @@ func TestCodexTurnStateRefreshClassification(t *testing.T) {
 				t.Errorf("Error = %q, want 包含 %q", result.Error, tc.wantErrSub)
 			}
 		})
+	}
+}
+
+// TestCodexTurnStateRefreshRetriesUntilGood 轮换池前几次给 312、之后给 292：
+// 循环应提前停在 292，不再多探测。
+func TestCodexTurnStateRefreshRetriesUntilGood(t *testing.T) {
+	oldDelay := codexTurnStateProbeDelay
+	codexTurnStateProbeDelay = 0
+	defer func() { codexTurnStateProbeDelay = oldDelay }()
+	t.Setenv("CODEX_TURN_STATE_REFRESH_ATTEMPTS", "8")
+
+	degraded := strings.Repeat("b", auth.CodexTurnStateDegradedLength)
+	good := strings.Repeat("a", auth.CodexTurnStateGoodLength)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		if n <= 2 {
+			w.Header().Set(codexTurnStateHeader, degraded)
+		} else {
+			w.Header().Set(codexTurnStateHeader, good)
+		}
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	defer srv.Close()
+
+	old := codexTurnStateProbeURL
+	codexTurnStateProbeURL = srv.URL
+	defer func() { codexTurnStateProbeURL = old }()
+
+	h, account := newTurnStateTestHandler(t)
+	result, err := h.RefreshCodexTurnState(context.Background(), account)
+	// 无真实 DB，落库必然失败；关键是第 3 次探测就拿到 292 并停下。
+	if err == nil || !strings.Contains(err.Error(), "存储未就绪") {
+		t.Fatalf("应在落库阶段失败, err = %v", err)
+	}
+	if result.Length != auth.CodexTurnStateGoodLength {
+		t.Errorf("Length = %d, want %d", result.Length, auth.CodexTurnStateGoodLength)
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Errorf("探测次数 = %d, want 3（拿到 292 即停）", got)
 	}
 }
 

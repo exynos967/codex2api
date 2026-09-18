@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,6 +39,26 @@ func codexTurnStateRefreshInterval() time.Duration {
 		return d
 	}
 	return 0 // 显式的 0 / 非法值都视为关闭周期巡检
+}
+
+// codexTurnStateProbeDelay 连续探测间的间隔；测试可调小。
+var codexTurnStateProbeDelay = 2 * time.Second
+
+// codexTurnStateRefreshAttempts 单次触发内的最大探测次数（轮换代理池每次连接
+// 换 IP，连探几次就该撞上正常出口；探测是真实请求，必须封顶）。
+func codexTurnStateRefreshAttempts() int {
+	raw := strings.TrimSpace(os.Getenv("CODEX_TURN_STATE_REFRESH_ATTEMPTS"))
+	if raw == "" {
+		return 8
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 8
+	}
+	if n > 30 {
+		return 30
+	}
+	return n
 }
 
 // TurnStateRefreshResult 一次探测的结果。
@@ -218,30 +239,48 @@ func (h *Handler) RefreshCodexTurnState(ctx context.Context, account *auth.Accou
 		account.Mu().RUnlock()
 	}
 
-	state, status, err := h.probeCodexTurnState(ctx, account, accessToken, model, proxyURL)
-	if err != nil {
-		return TurnStateRefreshResult{Error: err.Error()}, err
-	}
-	result := TurnStateRefreshResult{Length: len(state)}
-	switch len(state) {
-	case auth.CodexTurnStateGoodLength:
-		if err := h.store.ApplyCodexTurnStateRefreshResult(ctx, account.ID(), state); err != nil {
-			result.Error = err.Error()
-			return result, err
+	// 轮换代理池每次连接换出口 IP：单次触发内连续探测，拿到 292 立即停；
+	// 次数有上限（探测是真实请求，烧少量 token，不能无限刷）。
+	maxAttempts := codexTurnStateRefreshAttempts()
+	var lastErr error
+	lastLength := 0
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return TurnStateRefreshResult{Error: ctx.Err().Error()}, ctx.Err()
 		}
-		result.Pinned = true
-		log.Printf("[turn-state-refresh] account=%d model=%s 已固定 292 token", account.ID(), model)
-	case auth.CodexTurnStateDegradedLength:
-		result.Error = "上游返回降智形态（312），未回写；请更换专用代理出口 IP 后重试"
-		return result, fmt.Errorf("%s", result.Error)
-	case 0:
-		result.Error = fmt.Sprintf("上游未回传 turn-state（HTTP %d）", status)
-		return result, fmt.Errorf("%s", result.Error)
-	default:
-		result.Error = fmt.Sprintf("未知形态长度 %d（HTTP %d），未回写", len(state), status)
-		return result, fmt.Errorf("%s", result.Error)
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return TurnStateRefreshResult{Error: ctx.Err().Error()}, ctx.Err()
+			case <-time.After(codexTurnStateProbeDelay):
+			}
+		}
+		state, status, err := h.probeCodexTurnState(ctx, account, accessToken, model, proxyURL)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		lastLength = len(state)
+		result := TurnStateRefreshResult{Length: len(state)}
+		switch len(state) {
+		case auth.CodexTurnStateGoodLength:
+			if err := h.store.ApplyCodexTurnStateRefreshResult(ctx, account.ID(), state); err != nil {
+				result.Error = err.Error()
+				return result, err
+			}
+			result.Pinned = true
+			log.Printf("[turn-state-refresh] account=%d model=%s 第 %d/%d 次探测固定 292 token", account.ID(), model, attempt, maxAttempts)
+			return result, nil
+		case auth.CodexTurnStateDegradedLength:
+			lastErr = fmt.Errorf("上游返回降智形态（312）")
+		case 0:
+			lastErr = fmt.Errorf("上游未回传 turn-state（HTTP %d）", status)
+		default:
+			lastErr = fmt.Errorf("未知形态长度 %d（HTTP %d）", len(state), status)
+		}
 	}
-	return result, nil
+	result := TurnStateRefreshResult{Length: lastLength, Error: fmt.Sprintf("%d 次探测均未拿到非降智 token：%v；请检查专用代理出口 IP 池", maxAttempts, lastErr)}
+	return result, fmt.Errorf("%s", result.Error)
 }
 
 // codexTurnStateProbeURL 探测端点；测试可替换为本地 httptest 服务。
