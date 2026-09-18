@@ -267,6 +267,8 @@ func (h *Handler) buildAccountResponse(
 		CodexTurnState:               strings.TrimSpace(row.GetCredential(auth.CodexTurnStateCredentialKey)),
 		CodexTurnStateModels:         auth.NormalizeCodexTurnStateModels(row.GetCredential(auth.CodexTurnStateModelsCredentialKey)),
 		CodexTurnStateSetAt:          strings.TrimSpace(row.GetCredential(auth.CodexTurnStateSetAtCredentialKey)),
+		CodexTurnStateRefreshEnabled: strings.TrimSpace(row.GetCredential(auth.CodexTurnStateRefreshEnabledCredentialKey)),
+		CodexTurnStateRefreshProxy:   strings.TrimSpace(row.GetCredential(auth.CodexTurnStateRefreshProxyCredentialKey)),
 		CustomHeaders:                customHeaders,
 		UpstreamRequestIDHeader:      row.GetCredential(auth.UpstreamRequestIDHeaderCredentialKey),
 		ProxyURL:                     row.ProxyURL,

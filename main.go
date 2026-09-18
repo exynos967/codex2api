@@ -423,6 +423,8 @@ func main() {
 	handler.SetRuntimeCache(tc)
 	defer handler.CloseAPIKeyAuthCache()
 	adminHandler.SetAPIKeyAuthCacheHandler(handler)
+	// turn-state 自动刷新（周期巡检 + 降智观测反应式触发；账号级开关默认关）。
+	handler.StartCodexTurnStateRefresh(backgroundCtx)
 
 	// 注册 WebSocket 执行函数（避免 proxy ↔ wsrelay 循环依赖）
 	proxy.WebsocketExecuteFunc = wsrelay.ExecuteRequestWebsocket

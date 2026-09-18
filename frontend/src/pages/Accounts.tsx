@@ -1906,6 +1906,10 @@ export default function Accounts() {
   // Turn State 强制注入:注入值 + 限定模型(逗号分隔)。仅 Codex 官方账号下发。
   const [editCodexTurnState, setEditCodexTurnState] = useState("");
   const [editCodexTurnStateModels, setEditCodexTurnStateModels] = useState("");
+  // Turn State 自动刷新:开关 + 专用探测代理;手动刷新按钮的进行中态。
+  const [editCodexTurnStateRefreshEnabled, setEditCodexTurnStateRefreshEnabled] = useState(false);
+  const [editCodexTurnStateRefreshProxy, setEditCodexTurnStateRefreshProxy] = useState("");
+  const [turnStateRefreshing, setTurnStateRefreshing] = useState(false);
   // 时效倒计时的时钟源:编辑弹窗打开期间每秒推进一次,关闭即停。
   const [turnStateNow, setTurnStateNow] = useState(() => Date.now());
   // 代理池条目：账号表单里"从代理池选择"下拉的数据源。加载失败静默留空
@@ -2278,6 +2282,37 @@ export default function Accounts() {
     const timer = window.setInterval(() => setTurnStateNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [turnStateTtlVisible]);
+
+  // 手动刷新 Turn-State:调专用端点经探测代理向上游索取 292(正常)形态 token
+  // 并回写;pinned=false/409 时展示后端返回的降智等原因。
+  const handleRefreshCodexTurnState = async () => {
+    if (!editingAccount || turnStateRefreshing) return;
+    setTurnStateRefreshing(true);
+    try {
+      const result = await api.refreshCodexTurnState(editingAccount.id);
+      if (result.pinned) {
+        showToast(t("accounts.codexTurnStateRefreshPinned"), "success");
+        if (result.state) {
+          setEditCodexTurnState(result.state);
+        }
+        await reload();
+      } else {
+        showToast(
+          result.error || t("accounts.codexTurnStateRefreshFailed"),
+          "error",
+        );
+      }
+    } catch (error) {
+      showToast(
+        t("accounts.codexTurnStateRefreshFailedDetail", {
+          error: getErrorMessage(error),
+        }),
+        "error",
+      );
+    } finally {
+      setTurnStateRefreshing(false);
+    }
+  };
 
   const renderCodexTurnStateTtl = () => {
     if (!turnStateTtlVisible) return null;
@@ -5640,6 +5675,12 @@ export default function Accounts() {
     );
     setEditCodexTurnState(account.codex_turn_state ?? "");
     setEditCodexTurnStateModels(account.codex_turn_state_models ?? "");
+    setEditCodexTurnStateRefreshEnabled(
+      (account.codex_turn_state_refresh_enabled ?? "") === "true",
+    );
+    setEditCodexTurnStateRefreshProxy(
+      account.codex_turn_state_refresh_proxy ?? "",
+    );
     setEditTags(account.tags ?? []);
     setEditGroupIds(account.group_ids ?? []);
     setEditOpenAIForm({
@@ -5701,6 +5742,8 @@ export default function Accounts() {
     setEditTimezoneCustom(false);
     setEditCodexTurnState("");
     setEditCodexTurnStateModels("");
+    setEditCodexTurnStateRefreshEnabled(false);
+    setEditCodexTurnStateRefreshProxy("");
     setEditTags([]);
     setEditGroupIds([]);
     setEditOpenAIForm({
@@ -5864,6 +5907,10 @@ export default function Accounts() {
               timezone: editTimezone.trim(),
               codex_turn_state: editCodexTurnState.trim(),
               codex_turn_state_models: editCodexTurnStateModels.trim(),
+              codex_turn_state_refresh_enabled:
+                editCodexTurnStateRefreshEnabled ? "true" : "",
+              codex_turn_state_refresh_proxy:
+                editCodexTurnStateRefreshProxy.trim(),
             }
           : {}),
       };
@@ -10000,6 +10047,56 @@ export default function Accounts() {
                               <p className="mt-1.5 text-xs text-muted-foreground">
                                 {t("accounts.codexTurnStateModelsHint")}
                               </p>
+                            </div>
+                            <div className="mt-3 flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-muted-foreground">
+                                  {t("accounts.codexTurnStateRefreshLabel")}
+                                </div>
+                                <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                                  {t("accounts.codexTurnStateRefreshHint")}
+                                </p>
+                              </div>
+                              <Switch
+                                checked={editCodexTurnStateRefreshEnabled}
+                                onCheckedChange={setEditCodexTurnStateRefreshEnabled}
+                                aria-label={t("accounts.codexTurnStateRefreshLabel")}
+                              />
+                            </div>
+                            <div className="mt-3">
+                              <label className="block text-sm font-semibold text-muted-foreground mb-2">
+                                {t("accounts.codexTurnStateRefreshProxyLabel")}
+                              </label>
+                              <Input
+                                value={editCodexTurnStateRefreshProxy}
+                                placeholder={t(
+                                  "accounts.codexTurnStateRefreshProxyPlaceholder",
+                                )}
+                                onChange={(
+                                  event: ChangeEvent<HTMLInputElement>,
+                                ) =>
+                                  setEditCodexTurnStateRefreshProxy(
+                                    event.target.value,
+                                  )
+                                }
+                                spellCheck={false}
+                              />
+                              <p className="mt-1.5 text-xs text-muted-foreground">
+                                {t("accounts.codexTurnStateRefreshProxyHint")}
+                              </p>
+                            </div>
+                            <div className="mt-3">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                disabled={turnStateRefreshing}
+                                onClick={handleRefreshCodexTurnState}
+                              >
+                                {turnStateRefreshing
+                                  ? t("accounts.codexTurnStateRefreshing")
+                                  : t("accounts.codexTurnStateRefreshButton")}
+                              </Button>
                             </div>
                           </div>
                         ) : null}

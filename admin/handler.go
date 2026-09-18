@@ -1119,6 +1119,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/openai-responses/models", h.FetchOpenAIResponsesModels)
 	api.PATCH("/accounts/:id/openai-responses", h.UpdateOpenAIResponsesAccount)
 	api.GET("/accounts/:id/openai-responses/balance", h.GetOpenAIResponsesBalance)
+	api.POST("/accounts/:id/codex-turn-state/refresh", h.RefreshCodexTurnState)
 	api.POST("/accounts/grok", h.AddGrokAccount)
 	api.POST("/accounts/grok/models", h.FetchGrokModels)
 	api.POST("/accounts/grok/batch-models", h.BatchUpdateGrokModels)
@@ -1690,6 +1691,8 @@ type accountResponse struct {
 	CodexTurnState                string                      `json:"codex_turn_state,omitempty"`
 	CodexTurnStateModels          string                      `json:"codex_turn_state_models,omitempty"`
 	CodexTurnStateSetAt           string                      `json:"codex_turn_state_set_at,omitempty"`
+	CodexTurnStateRefreshEnabled  string                      `json:"codex_turn_state_refresh_enabled,omitempty"`
+	CodexTurnStateRefreshProxy    string                      `json:"codex_turn_state_refresh_proxy,omitempty"`
 	CustomHeaders                 map[string]string           `json:"custom_headers,omitempty"`
 	HealthTier                    string                      `json:"health_tier"`
 	SchedulerScore                float64                     `json:"scheduler_score"`
@@ -2150,6 +2153,9 @@ type updateAccountSchedulerReq struct {
 	Timezone                json.RawMessage `json:"timezone"`
 	CodexTurnState          json.RawMessage `json:"codex_turn_state"`
 	CodexTurnStateModels    json.RawMessage `json:"codex_turn_state_models"`
+	// turn-state 自动刷新开关与专用探测代理（见 proxy/codex_turn_state_refresh.go）。
+	CodexTurnStateRefreshEnabled json.RawMessage `json:"codex_turn_state_refresh_enabled"`
+	CodexTurnStateRefreshProxy   json.RawMessage `json:"codex_turn_state_refresh_proxy"`
 }
 
 type accountSchedulerUpdate struct {
@@ -2176,7 +2182,10 @@ type accountSchedulerUpdate struct {
 	Timezone                database.OptionalString
 	CodexTurnState          database.OptionalString
 	CodexTurnStateModels    database.OptionalString
-	CredentialUpdates       map[string]interface{}
+	// turn-state 自动刷新配置（值落凭据；运行时同步走 ApplyAccountCodexTurnStateRefresh）。
+	CodexTurnStateRefreshEnabled database.OptionalString
+	CodexTurnStateRefreshProxy   database.OptionalString
+	CredentialUpdates            map[string]interface{}
 }
 
 func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedulerUpdate, error) {
@@ -2293,6 +2302,14 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if codexTurnStateModelsField.Set {
 		codexTurnStateModelsField.Value = auth.NormalizeCodexTurnStateModels(codexTurnStateModelsField.Value)
 	}
+	codexTurnStateRefreshEnabledField, err := parseOptionalStringField(req.CodexTurnStateRefreshEnabled, "codex_turn_state_refresh_enabled", validateTruthyFlag)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	codexTurnStateRefreshProxyField, err := parseOptionalStringField(req.CodexTurnStateRefreshProxy, "codex_turn_state_refresh_proxy", validateOptionalProxyURL)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
 	if codexFingerprintMode.Set {
 		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
 	}
@@ -2338,6 +2355,12 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if codexTurnStateModelsField.Set {
 		credentialUpdates[auth.CodexTurnStateModelsCredentialKey] = codexTurnStateModelsField.Value
 	}
+	if codexTurnStateRefreshEnabledField.Set {
+		credentialUpdates[auth.CodexTurnStateRefreshEnabledCredentialKey] = codexTurnStateRefreshEnabledField.Value
+	}
+	if codexTurnStateRefreshProxyField.Set {
+		credentialUpdates[auth.CodexTurnStateRefreshProxyCredentialKey] = codexTurnStateRefreshProxyField.Value
+	}
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
 	}
@@ -2376,31 +2399,63 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	}
 
 	return accountSchedulerUpdate{
-		ScoreBiasOverride:       scoreBiasOverride,
-		BaseConcurrencyOverride: baseConcurrencyOverride,
-		SkipWarmTier:            skipWarmTier,
-		AllowedAPIKeyIDs:        allowedAPIKeyIDs,
-		Tags:                    tags,
-		GroupIDs:                groupIDs,
-		AutoPause5hThreshold:    autoPause5hThreshold,
-		AutoPause7dThreshold:    autoPause7dThreshold,
-		AutoPause5hDisabled:     autoPause5hDisabled,
-		AutoPause7dDisabled:     autoPause7dDisabled,
-		UsageLimitOverride:      ignoreUsageLimitStatusOverride,
-		DispatchCountLimit:      dispatchCountLimit,
-		SchedulerPriority:       schedulerPriority,
-		ProxyURL:                proxyURL,
-		CustomHeaders:           customHeaders,
-		CodexFingerprintMode:    codexFingerprintMode,
-		ClaudeFingerprintMode:   claudeFingerprintMode,
-		ClaudeClientPlatform:    claudeClientPlatform,
-		ClaudeVersionPolicy:     claudeVersionPolicy,
-		ClaudeClientVersion:     claudeClientVersion,
-		Timezone:                timezoneField,
-		CodexTurnState:          codexTurnStateField,
-		CodexTurnStateModels:    codexTurnStateModelsField,
-		CredentialUpdates:       credentialUpdates,
+		ScoreBiasOverride:            scoreBiasOverride,
+		BaseConcurrencyOverride:      baseConcurrencyOverride,
+		SkipWarmTier:                 skipWarmTier,
+		AllowedAPIKeyIDs:             allowedAPIKeyIDs,
+		Tags:                         tags,
+		GroupIDs:                     groupIDs,
+		AutoPause5hThreshold:         autoPause5hThreshold,
+		AutoPause7dThreshold:         autoPause7dThreshold,
+		AutoPause5hDisabled:          autoPause5hDisabled,
+		AutoPause7dDisabled:          autoPause7dDisabled,
+		UsageLimitOverride:           ignoreUsageLimitStatusOverride,
+		DispatchCountLimit:           dispatchCountLimit,
+		SchedulerPriority:            schedulerPriority,
+		ProxyURL:                     proxyURL,
+		CustomHeaders:                customHeaders,
+		CodexFingerprintMode:         codexFingerprintMode,
+		ClaudeFingerprintMode:        claudeFingerprintMode,
+		ClaudeClientPlatform:         claudeClientPlatform,
+		ClaudeVersionPolicy:          claudeVersionPolicy,
+		ClaudeClientVersion:          claudeClientVersion,
+		Timezone:                     timezoneField,
+		CodexTurnState:               codexTurnStateField,
+		CodexTurnStateModels:         codexTurnStateModelsField,
+		CodexTurnStateRefreshEnabled: codexTurnStateRefreshEnabledField,
+		CodexTurnStateRefreshProxy:   codexTurnStateRefreshProxyField,
+		CredentialUpdates:            credentialUpdates,
 	}, nil
+}
+
+// validateTruthyFlag 允许 "true"/"false"/""（关）。
+func validateTruthyFlag(value string) error {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "true", "false", "1", "0", "yes", "no", "on", "off":
+		return nil
+	}
+	return fmt.Errorf("must be a boolean flag (true/false)")
+}
+
+// validateOptionalProxyURL 允许空串，其余必须是 http(s):// 或 socks5:// 代理 URL。
+func validateOptionalProxyURL(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return fmt.Errorf("invalid proxy URL: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return fmt.Errorf("proxy URL scheme must be http/https/socks5")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("proxy URL missing host")
+	}
+	return nil
 }
 
 // validateClaudeFingerprintMode 允许空串(=跟随全局默认),其余必须是 preserve/force。
@@ -2795,6 +2850,18 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 				setAt = auth.ParseCodexTurnStateSetAt(raw)
 			}
 			h.store.ApplyAccountCodexTurnState(id, value, models, setAt)
+		}
+	}
+	if update.CodexTurnStateRefreshEnabled.Set || update.CodexTurnStateRefreshProxy.Set {
+		if account := h.store.FindByID(id); account != nil {
+			enabled, proxyURL := account.CodexTurnStateRefreshConfig()
+			if update.CodexTurnStateRefreshEnabled.Set {
+				enabled = update.CodexTurnStateRefreshEnabled.Value == "true"
+			}
+			if update.CodexTurnStateRefreshProxy.Set {
+				proxyURL = update.CodexTurnStateRefreshProxy.Value
+			}
+			h.store.ApplyAccountCodexTurnStateRefresh(id, enabled, proxyURL)
 		}
 	}
 	if update.CustomHeaders.Set {
@@ -9247,29 +9314,29 @@ type settingsResponse struct {
 	GrokOAuthClientIDEffective   string `json:"grok_oauth_client_id_effective"`
 	// Antigravity OAuth client 配置视图（嵌入展平）。
 	antigravityOAuthSettingsView
-	MaxRetries                         int                              `json:"max_retries"`
-	MaxRateLimitRetries                int                              `json:"max_rate_limit_retries"`
-	RetryIntervalMS                    int                              `json:"retry_interval_ms"`
-	TransportRetryPolicy               string                           `json:"transport_retry_policy"`
-	ContinuousRetryEnabled             bool                             `json:"continuous_retry_enabled"`
-	ContinuousRetryCatchAll            bool                             `json:"continuous_retry_catch_all"`
-	ContinuousRetryCategories          []string                         `json:"continuous_retry_categories"`
-	ContinuousRetryStatusCodes         []int                            `json:"continuous_retry_status_codes"`
-	ContinuousRetryErrorCodes          []string                         `json:"continuous_retry_error_codes"`
-	ContinuousRetryMaxDurationSeconds  int                              `json:"continuous_retry_max_duration_seconds"`
-	CodexFingerprintDefaultMode        string                           `json:"codex_fingerprint_default_mode"`
-	AllowRemoteMigration               bool                             `json:"allow_remote_migration"`
-	DatabaseDriver                     string                           `json:"database_driver"`
-	DatabaseLabel                      string                           `json:"database_label"`
-	CacheDriver                        string                           `json:"cache_driver"`
-	CacheLabel                         string                           `json:"cache_label"`
-	ExpiredCleaned                     int                              `json:"expired_cleaned,omitempty"`
-	ModelMapping                       string                           `json:"model_mapping"`
-	CodexModelMapping                  string                           `json:"codex_model_mapping"`
-	PayloadRules                       string                           `json:"payload_rules"`
-	ReasoningEffortModels              string                           `json:"reasoning_effort_models"`
-	ResinURL                           string                           `json:"resin_url"`
-	ResinPlatformName                  string                           `json:"resin_platform_name"`
+	MaxRetries                        int      `json:"max_retries"`
+	MaxRateLimitRetries               int      `json:"max_rate_limit_retries"`
+	RetryIntervalMS                   int      `json:"retry_interval_ms"`
+	TransportRetryPolicy              string   `json:"transport_retry_policy"`
+	ContinuousRetryEnabled            bool     `json:"continuous_retry_enabled"`
+	ContinuousRetryCatchAll           bool     `json:"continuous_retry_catch_all"`
+	ContinuousRetryCategories         []string `json:"continuous_retry_categories"`
+	ContinuousRetryStatusCodes        []int    `json:"continuous_retry_status_codes"`
+	ContinuousRetryErrorCodes         []string `json:"continuous_retry_error_codes"`
+	ContinuousRetryMaxDurationSeconds int      `json:"continuous_retry_max_duration_seconds"`
+	CodexFingerprintDefaultMode       string   `json:"codex_fingerprint_default_mode"`
+	AllowRemoteMigration              bool     `json:"allow_remote_migration"`
+	DatabaseDriver                    string   `json:"database_driver"`
+	DatabaseLabel                     string   `json:"database_label"`
+	CacheDriver                       string   `json:"cache_driver"`
+	CacheLabel                        string   `json:"cache_label"`
+	ExpiredCleaned                    int      `json:"expired_cleaned,omitempty"`
+	ModelMapping                      string   `json:"model_mapping"`
+	CodexModelMapping                 string   `json:"codex_model_mapping"`
+	PayloadRules                      string   `json:"payload_rules"`
+	ReasoningEffortModels             string   `json:"reasoning_effort_models"`
+	ResinURL                          string   `json:"resin_url"`
+	ResinPlatformName                 string   `json:"resin_platform_name"`
 	// CodexEgress 是后端权威的"Codex 渠道当前由谁承担出站"摘要:Resin 启用时代理池与
 	// proxy_url 对 Codex 不生效,界面据此标注,避免三套配置并存看不出谁在生效(issue #679)。
 	CodexEgress                        proxy.CodexEgressSummary         `json:"codex_egress"`

@@ -181,6 +181,10 @@ type Account struct {
 	CodexTurnState       string
 	CodexTurnStateModels string
 	CodexTurnStateSetAt  time.Time
+	// CodexTurnStateRefresh* 见 codex_turn_state.go：turn-state 自动刷新开关与
+	// 专用探测代理（换出口 IP 拿非降智 token）。
+	CodexTurnStateRefreshEnabled bool
+	CodexTurnStateRefreshProxy   string
 	// ClaudeFingerprintMode 见 claude_fingerprint_mode.go:Claude Code 出站身份头
 	// 收敛模式(preserve/force;空=跟随全局默认)。
 	ClaudeFingerprintMode string

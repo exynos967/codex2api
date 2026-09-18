@@ -147,6 +147,7 @@ func beginUpstreamTrace(ctx context.Context, account *auth.Account, proxyURL str
 			return
 		} // A WS handshake ID is not a per-turn ID; WS turn state arrives per frame, see ObserveCodexTurnStateFrame.
 		turnState := observedCodexTurnState(resp.Header.Get(codexTurnStateHeader))
+		observeDegradedTurnState(account.ID(), turnState)
 		upstreamModel := strings.TrimSpace(resp.Header.Get(codexOpenAIModelHeader))
 		id := ""
 		if header != "" && auth.ValidateUpstreamRequestIDHeader(header) == nil {

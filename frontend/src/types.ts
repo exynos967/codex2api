@@ -341,6 +341,10 @@ export interface AccountRow {
   codex_turn_state_models?: string
   /** RFC3339 timestamp of the last time the injected value changed; absent = unknown. */
   codex_turn_state_set_at?: string
+  /** Auto-refresh of the injected turn state via upstream probing; "true" = on, "" = off. */
+  codex_turn_state_refresh_enabled?: string
+  /** Dedicated proxy URL for turn-state refresh probing; empty = use the account's own proxy. */
+  codex_turn_state_refresh_proxy?: string
   health_tier?: string
   scheduler_score?: number
   dispatch_score?: number
@@ -1464,6 +1468,10 @@ export interface UpdateAccountSchedulerRequest {
   timezone?: string | null
   codex_turn_state?: string | null
   codex_turn_state_models?: string | null
+  /** "true" enables auto-refresh probing; "" disables. */
+  codex_turn_state_refresh_enabled?: string | null
+  /** Dedicated proxy for refresh probing; empty = account's own proxy. */
+  codex_turn_state_refresh_proxy?: string | null
 }
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {

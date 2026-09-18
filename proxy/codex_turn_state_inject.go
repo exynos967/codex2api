@@ -182,6 +182,15 @@ func codexTurnStateFromFrame(payload []byte) string {
 func ObserveCodexTurnStateFrame(ctx context.Context, payload []byte) {
 	if state := codexTurnStateFromFrame(payload); state != "" {
 		noteUpstreamTurnState(ctx, state)
+		if a := upstreamTraceFromContext(ctx); a != nil {
+			a.mu.Lock()
+			accountID := int64(0)
+			if a.current != nil {
+				accountID = a.current.accountID
+			}
+			a.mu.Unlock()
+			observeDegradedTurnState(accountID, state)
+		}
 	}
 	if model := codexUpstreamModelFromFrame(payload); model != "" {
 		noteUpstreamResponseModel(ctx, model)

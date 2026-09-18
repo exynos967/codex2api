@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -17,6 +18,19 @@ const (
 	// CodexTurnStateSetAtCredentialKey 记录注入值最后一次被换掉的时刻（RFC3339）。
 	// 只服务于界面上的 1 小时时效倒计时：换值时重置，只改模型名单时保持不变。
 	CodexTurnStateSetAtCredentialKey = "codex_turn_state_set_at"
+
+	// CodexTurnStateRefreshEnabledCredentialKey / CodexTurnStateRefreshProxyCredentialKey
+	// 控制 turn-state 自动刷新（见 proxy/codex_turn_state_refresh.go）：开启后网关
+	// 定期/在观测到降智 token（长度 312）时，经专用代理向上游探测新 token，
+	// 只接受不降智形态（长度 292）并回写注入值。专用代理用于换出口 IP——312 形态
+	// 与铸造 IP 绑定，换 IP 是拿到 292 的前提。
+	CodexTurnStateRefreshEnabledCredentialKey = "codex_turn_state_refresh_enabled"
+	CodexTurnStateRefreshProxyCredentialKey   = "codex_turn_state_refresh_proxy"
+
+	// Codex turn-state token 形态（参考 turnstate 过滤器实测）：292 可复用不降智，
+	// 312 为 IP 绑定的降智形态。
+	CodexTurnStateGoodLength     = 292
+	CodexTurnStateDegradedLength = 312
 
 	// maxCodexTurnStateBytes：实测值在 300 字符上下，留一个数量级余量即可。
 	maxCodexTurnStateBytes       = 4096
@@ -163,6 +177,27 @@ func (a *Account) setCodexTurnStateFromRowLocked(row interface {
 	a.CodexTurnState = strings.TrimSpace(row.GetCredential(CodexTurnStateCredentialKey))
 	a.CodexTurnStateModels = NormalizeCodexTurnStateModels(row.GetCredential(CodexTurnStateModelsCredentialKey))
 	a.CodexTurnStateSetAt = ParseCodexTurnStateSetAt(row.GetCredential(CodexTurnStateSetAtCredentialKey))
+	a.CodexTurnStateRefreshEnabled = parseTruthyCredential(row.GetCredential(CodexTurnStateRefreshEnabledCredentialKey))
+	a.CodexTurnStateRefreshProxy = strings.TrimSpace(row.GetCredential(CodexTurnStateRefreshProxyCredentialKey))
+}
+
+// parseTruthyCredential 解析凭据里的布尔开关（"1"/"true"/"yes"/"on" 为真）。
+func parseTruthyCredential(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// CodexTurnStateRefreshConfig 返回自动刷新配置快照（是否开启、专用探测代理）。
+func (a *Account) CodexTurnStateRefreshConfig() (enabled bool, proxy string) {
+	if a == nil {
+		return false, ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.CodexTurnStateRefreshEnabled, a.CodexTurnStateRefreshProxy
 }
 
 // ApplyAccountCodexTurnState 把管理端保存的注入配置立即发布到运行时账号。
@@ -172,6 +207,46 @@ func (s *Store) ApplyAccountCodexTurnState(id int64, value, models string, setAt
 		a.CodexTurnState = strings.TrimSpace(value)
 		a.CodexTurnStateModels = NormalizeCodexTurnStateModels(models)
 		a.CodexTurnStateSetAt = setAt
+		a.mu.Unlock()
+	}
+}
+
+// ApplyCodexTurnStateRefreshResult 把自动刷新探测到的非降智 token 持久化并发布
+// 到运行时（只动注入值与设置时刻，不碰模型名单）。CAS 失败（凭据代际已变）返回
+// 错误，由调用方决定重试或放弃——宁可丢一次刷新也不能覆盖并发写入。
+func (s *Store) ApplyCodexTurnStateRefreshResult(ctx context.Context, id int64, value string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("存储未就绪")
+	}
+	a := s.FindByID(id)
+	if a == nil {
+		return fmt.Errorf("账号 %d 不存在", id)
+	}
+	value = strings.TrimSpace(value)
+	setAt := time.Now().UTC()
+	_, applied, err := s.db.UpdateAccountCredentialsCAS(ctx, id, a.GetCredentialGeneration(), map[string]any{
+		CodexTurnStateCredentialKey:      value,
+		CodexTurnStateSetAtCredentialKey: setAt.Format(time.RFC3339),
+	})
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return fmt.Errorf("账号 %d 凭据代际冲突，刷新结果未落库", id)
+	}
+	a.mu.Lock()
+	a.CodexTurnState = value
+	a.CodexTurnStateSetAt = setAt
+	a.mu.Unlock()
+	return nil
+}
+
+// ApplyAccountCodexTurnStateRefresh 把管理端保存的自动刷新配置发布到运行时账号。
+func (s *Store) ApplyAccountCodexTurnStateRefresh(id int64, enabled bool, proxyURL string) {
+	if a := s.FindByID(id); a != nil {
+		a.mu.Lock()
+		a.CodexTurnStateRefreshEnabled = enabled
+		a.CodexTurnStateRefreshProxy = strings.TrimSpace(proxyURL)
 		a.mu.Unlock()
 	}
 }

@@ -60,6 +60,10 @@ type Handler struct {
 	db              *database.DB
 	cfg             *config.Config       // 全局配置
 	deviceCfg       *DeviceProfileConfig // 设备指纹配置
+	// turn-state 自动刷新（codex_turn_state_refresh.go）
+	turnStateRefreshStartOnce sync.Once
+	turnStateRefresherOnce    sync.Once
+	turnStateRefresh          *turnStateRefresher
 	cache           cache.TokenCache     // Redis/Memory 运行态缓存
 	apiKeyLookups   singleflight.Group
 	authCache       *apiKeyAuthCache
