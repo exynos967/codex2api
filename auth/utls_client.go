@@ -36,6 +36,10 @@ const (
 	utlsAuthIdleConnTimeout = 90 * time.Second
 )
 
+// utlsAuthSessionCache 缓存 auth 端点的 TLS 会话 ticket，重连走 TLS 1.3
+// resumption（与真实 codex 的 rustls 行为一致）。
+var utlsAuthSessionCache = utls.NewLRUClientSessionCache(64)
+
 func newUTLSAuthTransport(proxyURL string) http.RoundTripper {
 	var dialer xproxy.Dialer = xproxy.Direct
 	if proxyURL != "" {
@@ -104,7 +108,14 @@ func (t *utlsAuthRoundTripper) createConnection(host, addr string) (*http2.Clien
 		return nil, fmt.Errorf("TCP 连接失败: %w", err)
 	}
 
-	tlsConfig := &utls.Config{ServerName: host}
+	// rustls spec 末尾带 UtlsPreSharedKeyExtension：命中缓存会话时携带真实
+	// binder 复用会话（与真实 codex 的 rustls resumption 一致）；OmitEmptyPsk
+	// 保证无缓存会话的全新握手不上线空 PSK 扩展。
+	tlsConfig := &utls.Config{
+		ServerName:         host,
+		ClientSessionCache: utlsAuthSessionCache,
+		OmitEmptyPsk:       true,
+	}
 	// 与真实 Codex 客户端一致：auth 端点（OAuth 换 token / 刷新）走的也是
 	// reqwest + rustls + aws_lc_rs，不是浏览器——Chrome 指纹在此是自报假身份。
 	tlsConn := utls.UClient(conn, tlsConfig, utls.HelloCustom)

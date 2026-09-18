@@ -32,8 +32,11 @@ func TestRustlsSpecCapture(t *testing.T) {
 		t.Fatalf("连接抓包服务器失败: %v", err)
 	}
 	defer conn.Close()
+	counting := &countingConn{Conn: conn}
 
-	tlsConn := utls.UClient(conn, &utls.Config{ServerName: "chatgpt.com"}, utls.HelloCustom)
+	// OmitEmptyPsk 必须与生产配置一致：否则 spec 末尾的 PSK 扩展在无缓存
+	// 会话时直接报 ErrEmptyPsk，一个字节都发不出去。
+	tlsConn := utls.UClient(counting, &utls.Config{ServerName: "chatgpt.com", OmitEmptyPsk: true}, utls.HelloCustom)
 	if err := tlsConn.ApplyPreset(CodexRustlsClientHelloSpec()); err != nil {
 		t.Fatalf("应用 rustls 指纹失败: %v", err)
 	}
@@ -41,4 +44,19 @@ func TestRustlsSpecCapture(t *testing.T) {
 	defer cancel()
 	// 抓包服务器不真实握手，失败属预期；ClientHello 已完整发出。
 	_ = tlsConn.HandshakeContext(ctx)
+	if counting.written < 200 {
+		t.Fatalf("ClientHello 疑似未发出：仅写入 %d 字节", counting.written)
+	}
+}
+
+// countingConn 统计写出的字节数，用于断言 ClientHello 确实上线。
+type countingConn struct {
+	net.Conn
+	written int
+}
+
+func (c *countingConn) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	c.written += n
+	return n, err
 }

@@ -71,12 +71,17 @@ func CodexRustlsClientHelloSpec() *utls.ClientHelloSpec {
 			0x0303, // TLS 1.2
 		}},
 		&utls.PSKKeyExchangeModesExtension{Modes: []uint8{1}}, // 45 psk_dhe_ke
-		&utls.KeyShareExtension{KeyShares: []utls.KeyShare{    // 51
+		&utls.KeyShareExtension{KeyShares: []utls.KeyShare{   // 51
 			// Data 留空由 uTLS 握手时生成真实密钥（>1 字节会被当作预设密钥原样发送）。
 			{Group: utls.X25519},
 		}},
 	}
 	shuffleTLSExtensions(extensions)
+	// pre_shared_key 固定末尾且不参与洗牌：TLS 1.3 要求它在最后（rustls 同样
+	// 钉在末尾）。配合 Config.OmitEmptyPsk，全新握手（无缓存会话）时该扩展
+	// 不上线，线与此前逐字节一致；命中会话缓存时携带真实 binder 复用会话，
+	// 与 rustls 的 resumption 行为一致。
+	extensions = append(extensions, &utls.UtlsPreSharedKeyExtension{})
 	return &utls.ClientHelloSpec{
 		// 0x0302 0x0301 0x0303 = TLS1.3 AES-256-GCM / AES-128-GCM / CHACHA20
 		// （aws_lc_rs 默认顺序，AES-256 在前，与 ring 不同）；随后 ECDHE 系；

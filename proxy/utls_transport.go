@@ -362,19 +362,17 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, fmt.Errorf("TCP 连接失败: %w", err)
 	}
 
-// 2. 配置 TLS
+	// 2. 配置 TLS（共享会话缓存，重连走 resumption 降低重连成本）。
 	tlsConfig := &utls.Config{
-		ServerName: host,
+		ServerName:         host,
+		ClientSessionCache: utlsSessionCache,
 	}
-	if t.helloSpec == nil {
-		// Chrome 指纹（浏览器 UA 场景）：共享会话缓存，重连走 resumption 降成本。
-		// Chrome spec 自带 PSK 扩展，resumption 安全。
-		tlsConfig.ClientSessionCache = utlsSessionCache
-	} else {
-		// rustls 指纹 spec 无 PreSharedKey 扩展：命中缓存会话时 utls 组装 PSK
-		// binder 会直接 panic。rustls 模式下彻底关闭 ticket 存储与恢复，
-		// 每次全新握手（连接池化后重连频率很低，成本可忽略）。
-		tlsConfig.SessionTicketsDisabled = true
+	if t.helloSpec != nil {
+		// rustls spec 末尾带 UtlsPreSharedKeyExtension：命中缓存会话时携带真实
+		// binder 复用会话——与真实 codex（rustls）的 TLS 1.3 resumption 行为一致。
+		// OmitEmptyPsk 保证无缓存会话的全新握手不上线空 PSK 扩展。
+		// Chrome 预设自带该语义，无需设置。
+		tlsConfig.OmitEmptyPsk = true
 	}
 
 	// 3. 使用 utls 握手（默认 Chrome 指纹；helloSpec 非空时用自定义指纹，
