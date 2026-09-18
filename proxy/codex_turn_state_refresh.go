@@ -185,20 +185,26 @@ func (h *Handler) turnStateRefresher() *turnStateRefresher {
 	return h.turnStateRefresh
 }
 
+// failRefreshResult 守卫类失败的统一出口：错误文案必须进 result.Error——
+// HTTP 层只序列化 result，Go error 到不了客户端，否则前端只能展示裸 JSON。
+func failRefreshResult(err error) (TurnStateRefreshResult, error) {
+	return TurnStateRefreshResult{Error: err.Error()}, err
+}
+
 // RefreshCodexTurnState 对单个账号执行一次探测刷新：成功拿到 292 形态即回写。
 // 并发安全：同一账号同时在途的刷新只有一个。
 func (h *Handler) RefreshCodexTurnState(ctx context.Context, account *auth.Account) (TurnStateRefreshResult, error) {
 	if h == nil || h.store == nil {
-		return TurnStateRefreshResult{}, fmt.Errorf("handler 未就绪")
+		return failRefreshResult(fmt.Errorf("handler 未就绪"))
 	}
 	if account == nil {
-		return TurnStateRefreshResult{}, fmt.Errorf("账号为空")
+		return failRefreshResult(fmt.Errorf("账号为空"))
 	}
 	r := h.turnStateRefresher()
 	r.mu.Lock()
 	if r.running[account.ID()] {
 		r.mu.Unlock()
-		return TurnStateRefreshResult{}, fmt.Errorf("该账号已有刷新在途")
+		return failRefreshResult(fmt.Errorf("该账号已有刷新在途"))
 	}
 	r.running[account.ID()] = true
 	r.mu.Unlock()
@@ -210,17 +216,17 @@ func (h *Handler) RefreshCodexTurnState(ctx context.Context, account *auth.Accou
 
 	enabled, refreshProxy := account.CodexTurnStateRefreshConfig()
 	if !enabled {
-		return TurnStateRefreshResult{}, fmt.Errorf("账号未开启 turn-state 自动刷新")
+		return failRefreshResult(fmt.Errorf("账号未开启 turn-state 自动刷新"))
 	}
 	if account.IsCodexAgentIdentity() {
-		return TurnStateRefreshResult{}, fmt.Errorf("Agent Identity 账号无 access_token，跳过")
+		return failRefreshResult(fmt.Errorf("Agent Identity 账号无 access_token，跳过"))
 	}
 
 	account.Mu().RLock()
 	accessToken := account.AccessToken
 	account.Mu().RUnlock()
 	if strings.TrimSpace(accessToken) == "" {
-		return TurnStateRefreshResult{}, fmt.Errorf("账号无 access_token")
+		return failRefreshResult(fmt.Errorf("账号无 access_token"))
 	}
 
 	// 探测模型：注入的模型名单第一个（token 按模型不通用，探测谁就对谁生效）；
@@ -228,7 +234,7 @@ func (h *Handler) RefreshCodexTurnState(ctx context.Context, account *auth.Accou
 	_, models, _ := account.CodexTurnStateConfig()
 	model := firstCodexTurnStateModel(models)
 	if model == "" {
-		return TurnStateRefreshResult{}, fmt.Errorf("未配置 codex_turn_state_models 模型名单，无法确定探测对象")
+		return failRefreshResult(fmt.Errorf("未配置 codex_turn_state_models 模型名单，无法确定探测对象"))
 	}
 
 	// 探测走专用代理（刷 IP 的意义所在）；未配置时退回账号自身代理。
