@@ -579,6 +579,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"usage_logs", "upstream_proxy_name", "TEXT DEFAULT ''"},
 		{"usage_logs", "injected_turn_state", "TEXT DEFAULT ''"},
 		{"usage_logs", "upstream_turn_state", "TEXT DEFAULT ''"},
+		{"usage_logs", "upstream_response_model", "TEXT DEFAULT ''"},
+		{"usage_logs", "upstream_model_mismatch", "BOOLEAN"},
 		{"usage_logs", "user_billing_mode", "TEXT DEFAULT ''"},
 		{"usage_logs", "image_unit_price", "REAL DEFAULT 0"},
 		{"usage_logs", "billed_image_count", "INTEGER DEFAULT 0"},

@@ -21,6 +21,9 @@ type upstreamTraceAttempt struct {
 	// upstreamTurnState 是上游响应回带的观测值。均为空串表示没有。
 	injectedTurnState string
 	upstreamTurnState string
+	// upstreamResponseModel 是上游自报的实际出活模型（openai-model 响应头 /
+	// WS response.metadata 帧），空串表示未观测。
+	upstreamResponseModel string
 }
 
 type upstreamTraceSnapshot struct {
@@ -30,6 +33,7 @@ type upstreamTraceSnapshot struct {
 	Proxy             auth.ProxyAuditLabel
 	InjectedTurnState string
 	UpstreamTurnState string
+	UpstreamModel     string
 }
 
 func snapshotUpstreamTrace(ctx context.Context) upstreamTraceSnapshot {
@@ -46,8 +50,21 @@ func snapshotUpstreamTrace(ctx context.Context) upstreamTraceSnapshot {
 		result.Proxy = a.current.proxy
 		result.InjectedTurnState = a.current.injectedTurnState
 		result.UpstreamTurnState = a.current.upstreamTurnState
+		result.UpstreamModel = a.current.upstreamResponseModel
 	}
 	return result
+}
+
+// upstreamModelMismatch 比对发往上游的模型与上游自报的实际出活模型。
+// 三态：未观测（上游没报）→ nil；不一致 → true。大小写不敏感等值判一致
+// （与真实 codex 客户端读 openai-model 头的口径一致）。
+func upstreamModelMismatch(sentModel, upstreamModel string) *bool {
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if upstreamModel == "" {
+		return nil
+	}
+	mismatch := !strings.EqualFold(strings.TrimSpace(sentModel), upstreamModel)
+	return &mismatch
 }
 
 func (s upstreamTraceSnapshot) apply(input *database.UsageLogInput) {
@@ -58,6 +75,8 @@ func (s upstreamTraceSnapshot) apply(input *database.UsageLogInput) {
 		input.UpstreamProxyName = s.Proxy.Name
 		input.InjectedTurnState = s.InjectedTurnState
 		input.UpstreamTurnState = s.UpstreamTurnState
+		input.UpstreamResponseModel = s.UpstreamModel
+		input.UpstreamModelMismatch = upstreamModelMismatch(input.EffectiveModel, s.UpstreamModel)
 	}
 }
 
@@ -128,6 +147,7 @@ func beginUpstreamTrace(ctx context.Context, account *auth.Account, proxyURL str
 			return
 		} // A WS handshake ID is not a per-turn ID; WS turn state arrives per frame, see ObserveCodexTurnStateFrame.
 		turnState := observedCodexTurnState(resp.Header.Get(codexTurnStateHeader))
+		upstreamModel := strings.TrimSpace(resp.Header.Get(codexOpenAIModelHeader))
 		id := ""
 		if header != "" && auth.ValidateUpstreamRequestIDHeader(header) == nil {
 			id = resp.Header.Get(header)
@@ -146,8 +166,29 @@ func beginUpstreamTrace(ctx context.Context, account *auth.Account, proxyURL str
 			if turnState != "" {
 				attempt.upstreamTurnState = turnState
 			}
+			if upstreamModel != "" {
+				attempt.upstreamResponseModel = security.SafeTruncate(upstreamModel, 128)
+			}
 		}
 	}
+}
+
+// codexOpenAIModelHeader 是上游自报实际出活模型的响应头（真实 codex-rs 读它
+// 作为 ServerModel）。
+const codexOpenAIModelHeader = "openai-model"
+
+// noteUpstreamResponseModel 把观测到的上游实际出活模型记到当前尝试上；
+// WS 路径逐帧调用（response.metadata 事件的 headers 里携带）。
+func noteUpstreamResponseModel(ctx context.Context, model string) {
+	a := upstreamTraceFromContext(ctx)
+	if a == nil || strings.TrimSpace(model) == "" {
+		return
+	}
+	a.mu.Lock()
+	if a.current != nil {
+		a.current.upstreamResponseModel = security.SafeTruncate(strings.TrimSpace(model), 128)
+	}
+	a.mu.Unlock()
 }
 
 // noteUpstreamTurnState 把上游回带的 turn state 记到当前尝试上；WS 路径逐帧调用，
@@ -191,5 +232,7 @@ func populateUpstreamTrace(c *gin.Context, input *database.UsageLogInput) {
 		input.UpstreamProxyName = current.proxy.Name
 		input.InjectedTurnState = current.injectedTurnState
 		input.UpstreamTurnState = current.upstreamTurnState
+		input.UpstreamResponseModel = current.upstreamResponseModel
+		input.UpstreamModelMismatch = upstreamModelMismatch(input.EffectiveModel, current.upstreamResponseModel)
 	}
 }

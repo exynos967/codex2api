@@ -2488,6 +2488,8 @@
     "userAgentWebSocketHint": "WebSocket 请求显示的是实际复用或新建连接在握手时发送给上游的 User-Agent。",
     "injectedTurnState": "注入 Turn State",
     "upstreamTurnState": "回带 Turn State",
+    "upstreamResponseModel": "上游响应模型",
+    "modelMismatch": "模型不一致",
     "tableEndpoint": "端点",
     "tableType": "类型",
     "tableToken": "TOKEN",

@@ -918,6 +918,29 @@ function UsageErrorSummaryCell({ log, mobile = false }: { log: UsageLog; mobile?
   )
 }
 
+// 上游自报模型与一致性警示:有观测值才渲染;与发往上游的模型不一致时追加警示色标签。
+// w-full + 外层 flex-wrap:小字行自然落到徽标行下方,不挤占徽标布局。
+function UpstreamModelLine({ log }: { log: UsageLog }) {
+  const { t } = useTranslation()
+  const upstreamModel = (log.upstream_response_model ?? '').trim()
+  if (!upstreamModel) return null
+  return (
+    <div className="flex w-full items-center gap-1 text-[10px] text-muted-foreground">
+      <span className="min-w-0 truncate font-mono" title={`${t('usage.upstreamResponseModel')}: ${upstreamModel}`}>
+        {t('usage.upstreamResponseModel')}: {upstreamModel}
+      </span>
+      {log.upstream_model_mismatch === true ? (
+        <Badge
+          variant="outline"
+          className="shrink-0 border-transparent bg-amber-500/12 px-1.5 py-0 text-[10px] font-semibold text-amber-700 dark:bg-amber-500/20 dark:text-amber-300"
+        >
+          {t('usage.modelMismatch')}
+        </Badge>
+      ) : null}
+    </div>
+  )
+}
+
 function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolean }) {
   const { t } = useTranslation()
   const clientUserAgent = log.client_user_agent?.trim() || ''
@@ -1111,6 +1134,7 @@ function CyberPolicyDetailButton({ log }: { log: UsageLog }) {
             <span className="font-mono text-foreground">{log.model || '-'}</span>
             <span>{formatBeijingTime(log.created_at)}</span>
           </div>
+          <UpstreamModelLine log={log} />
           {log.error_message ? (
             <div className="rounded-md border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs leading-relaxed text-red-700 dark:text-red-300">
               {log.error_message}
@@ -2493,25 +2517,28 @@ export default function Usage() {
                             </Badge>
                           ) : null}
                           {visibleColumns.model && (
-                            <Badge
-                              variant="outline"
-                              className={`${usageTableBadgeClass} ${usageClickableFilterClass} ${log.ultra ? 'usage-ultra-model' : ''} ${filterModel === log.model ? 'border-primary/50 text-primary' : ''}`}
-                              role="button"
-                              tabIndex={0}
-                              title={`${log.ultra ? `${t('usage.ultraModeHint')} · ` : ''}${t('usage.filterByModelHint', { model: log.model || '-' })}`}
-                              onClick={() => toggleModelFilter(log.model)}
-                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleModelFilter(log.model) } }}
-                            >
-                              {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'claude') && (
-                                <ChannelLogo
-                                  channel={log.channel}
-                                  size={13}
-                                  className="mr-1"
-                                  title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : log.channel === 'claude' ? 'Claude' : 'Codex'}
-                                />
-                              )}
-                              {log.model || '-'}
-                            </Badge>
+                            <>
+                              <Badge
+                                variant="outline"
+                                className={`${usageTableBadgeClass} ${usageClickableFilterClass} ${log.ultra ? 'usage-ultra-model' : ''} ${filterModel === log.model ? 'border-primary/50 text-primary' : ''}`}
+                                role="button"
+                                tabIndex={0}
+                                title={`${log.ultra ? `${t('usage.ultraModeHint')} · ` : ''}${t('usage.filterByModelHint', { model: log.model || '-' })}`}
+                                onClick={() => toggleModelFilter(log.model)}
+                                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleModelFilter(log.model) } }}
+                              >
+                                {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'claude') && (
+                                  <ChannelLogo
+                                    channel={log.channel}
+                                    size={13}
+                                    className="mr-1"
+                                    title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : log.channel === 'claude' ? 'Claude' : 'Codex'}
+                                  />
+                                )}
+                                {log.model || '-'}
+                              </Badge>
+                              <UpstreamModelLine log={log} />
+                            </>
                           )}
                           {log.reasoning_effort ? (
                             <ReasoningEffortBadge effort={log.reasoning_effort} />
@@ -2746,6 +2773,7 @@ export default function Usage() {
                                 → {log.effective_model}
                               </Badge>
                             )}
+                            <UpstreamModelLine log={log} />
                             {log.reasoning_effort ? (
                               <ReasoningEffortBadge effort={log.reasoning_effort} />
                             ) : null}

@@ -3428,6 +3428,10 @@ export interface UsageLog {
   injected_turn_state?: string
   /** X-Codex-Turn-State value observed from the upstream response ("" = none). */
   upstream_turn_state?: string
+  /** 上游自报的实际出活模型（"" = 未观测）。 */
+  upstream_response_model?: string
+  /** 三态:缺失=未观测,true=与发往上游的模型不一致,false=一致。 */
+  upstream_model_mismatch?: boolean
   id: number
   account_id: number
   // 上游渠道(codex/grok),写入时固化;历史行回填,可能为空

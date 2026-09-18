@@ -2488,6 +2488,8 @@
     "userAgentWebSocketHint": "For WebSocket requests, the upstream value is the User-Agent sent when the actual reused or new connection was established.",
     "injectedTurnState": "Injected Turn State",
     "upstreamTurnState": "Upstream Turn State",
+    "upstreamResponseModel": "Upstream response model",
+    "modelMismatch": "Model mismatch",
     "tableEndpoint": "Endpoint",
     "tableType": "Type",
     "tableToken": "Tokens",

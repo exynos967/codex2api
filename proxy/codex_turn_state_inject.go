@@ -176,9 +176,60 @@ func codexTurnStateFromFrame(payload []byte) string {
 }
 
 // ObserveCodexTurnStateFrame 供 WS 中继在逐帧转发时调用：发现上游回带的 turn state
-// 就记到本次尝试的追踪里（用量日志据此显示"回带 Turn State"）。
+// 就记到本次尝试的追踪里（用量日志据此显示"回带 Turn State"）；同一帧的
+// response.metadata headers 里若带 openai-model，一并记为上游实际出活模型
+// （用量日志的模型一致性审计用）。
 func ObserveCodexTurnStateFrame(ctx context.Context, payload []byte) {
 	if state := codexTurnStateFromFrame(payload); state != "" {
 		noteUpstreamTurnState(ctx, state)
 	}
+	if model := codexUpstreamModelFromFrame(payload); model != "" {
+		noteUpstreamResponseModel(ctx, model)
+	}
+}
+
+var codexOpenAIModelFrameNeedles = [][]byte{[]byte("openai-model"), []byte("OpenAI-Model")}
+
+// codexUpstreamModelFromFrame 从 WS 事件帧的 headers 承载位置里找 openai-model
+// （真实 codex-rs 在 response.metadata 事件的 headers 里读它，大小写不敏感）。
+func codexUpstreamModelFromFrame(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	mentioned := false
+	for _, needle := range codexOpenAIModelFrameNeedles {
+		if bytes.Contains(payload, needle) {
+			mentioned = true
+			break
+		}
+	}
+	if !mentioned {
+		return ""
+	}
+	root := gjson.ParseBytes(payload)
+	if !root.IsObject() {
+		return ""
+	}
+	for _, path := range []string{"headers", "response.headers", "metadata.headers", "response.metadata.headers"} {
+		object := root
+		if path != "" {
+			object = root.Get(path)
+		}
+		if !object.IsObject() {
+			continue
+		}
+		model := ""
+		object.ForEach(func(key, value gjson.Result) bool {
+			if value.Type == gjson.String &&
+				(strings.EqualFold(key.String(), "openai-model") || strings.EqualFold(key.String(), "x-openai-model")) {
+				model = value.String()
+				return false
+			}
+			return true
+		})
+		if model != "" {
+			return model
+		}
+	}
+	return ""
 }
