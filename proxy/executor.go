@@ -188,16 +188,24 @@ func releaseEvictedClient(client *http.Client) {
 const (
 	codexTransportModeStandard   = "standard"
 	codexTransportModeUTLSChrome = "utls_chrome"
+	codexTransportModeUTLSRustls = "utls_rustls"
 )
 
+// codexTransportModeFromEnv 解析 Codex 上游传输模式。
+//
+// 默认 utls_rustls：真实 Codex 客户端是 reqwest + rustls + aws_lc_rs（代理路径
+// 恒定为此栈），Go 原生 crypto/tls 与 Chrome 指纹都与真实客户端矛盾，属于
+// 传输层一眼可辨的破绽。standard / utls_chrome 仅留作回退与对照实验。
 func codexTransportModeFromEnv() string {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_TRANSPORT_MODE"))) {
-	case "", "standard", "go", "default":
+	case "standard", "go", "default":
 		return codexTransportModeStandard
-	case "utls", "utls_chrome", "chrome":
+	case "utls_chrome", "chrome":
 		return codexTransportModeUTLSChrome
+	case "", "utls", "utls_rustls", "rustls":
+		return codexTransportModeUTLSRustls
 	default:
-		return codexTransportModeStandard
+		return codexTransportModeUTLSRustls
 	}
 }
 
@@ -266,8 +274,10 @@ func newCodexTransport(proxyURL string) http.RoundTripper {
 	switch codexTransportModeFromEnv() {
 	case codexTransportModeUTLSChrome:
 		return NewUTLSTransport(proxyURL)
-	default:
+	case codexTransportModeStandard:
 		return newCodexStandardTransport(proxyURL)
+	default:
+		return NewUTLSRustlsTransport(proxyURL)
 	}
 }
 
@@ -1198,7 +1208,7 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 		account.Mu().RUnlock()
 	}
 
-	userAgent, version, usedGeneratedHeaders := resolveCodexOutboundClientHeaders(account, apiKey, deviceCfg, downstreamHeaders)
+	userAgent, _, usedGeneratedHeaders := resolveCodexOutboundClientHeaders(account, apiKey, deviceCfg, downstreamHeaders)
 	req.Header.Set("User-Agent", userAgent)
 
 	// Agent Identity 账号用动态签名的 AgentAssertion 头替代 Bearer（task 已由调用方确保就绪）。
@@ -1214,9 +1224,12 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	// 不发 Connection：这是 HTTP/2 明令禁止的 connection-specific 头（RFC 9113 §8.2.2），
 	// 而 Codex 官方上游走的就是 h2——Go 的 http2 transport 会把它剥掉，剥不掉的代理
 	// 链路上它则是个真实客户端不会有的多余头。真实 Codex 用 reqwest，同样不发。
-	if version != "" {
-		req.Header.Set("Version", version)
-	}
+	//
+	// 同样不发 Version：真实 codex-rs（全 git 历史核验）从未向 /backend-api/codex
+	// 发送 Version 头，版本信息只存在于 User-Agent。多发一个真实客户端没有的头，
+	// 本身就是上游指纹系统可利用的差异。中转路径（applyOpenAIResponsesRequestHeaders）
+	// 的 Version / x-codex-app-version 是第三方中转的准入约定（cockpit-tools
+	// issue #1892），与 chatgpt.com 直连无关，不受此约束。
 	// Originator 必须与出站 UA 的客户端前缀一致：网关自行生成 UA 时跟随生成结果
 	// （模拟 "Codex Desktop" 就发 "Codex Desktop"），透传官方客户端时沿用下游值。
 	if usedGeneratedHeaders {

@@ -28,8 +28,9 @@ func TestFetchOpenAIResponsesModelIDsSupportsV1BaseURL(t *testing.T) {
 		if got := r.Header.Get("Originator"); got != "codex-tui" {
 			t.Fatalf("Originator = %q, want codex-tui", got)
 		}
-		if got := r.Header.Get("Version"); got == "" {
-			t.Fatal("Version must be set")
+		// 模型发现走 ApplyCodexModelDiscoveryHeaders（直连形态），不再发 Version 头。
+		if got := r.Header.Get("Version"); got != "" {
+			t.Fatalf("Version = %q, want empty", got)
 		}
 		if got := r.Header.Get("X-Codex-Installation-Id"); got == "" {
 			t.Fatal("X-Codex-Installation-Id must be set")

@@ -20,11 +20,17 @@ func TestCodexUACatalogIntegrity(t *testing.T) {
 		if len(spec.Platforms) == 0 || len(spec.Terminals) == 0 || len(spec.AppNames) == 0 {
 			t.Fatalf("%s: platforms/terminals/app names must not be empty", kind)
 		}
-		if !codexUAHasPlatform(spec.Platforms, spec.DefaultPlatform) {
-			t.Fatalf("%s: default platform %+v is not an observed platform", kind, spec.DefaultPlatform)
-		}
-		if !codexUAHasOption(spec.Terminals, spec.DefaultTerminal) {
-			t.Fatalf("%s: default terminal %q is not an observed terminal", kind, spec.DefaultTerminal)
+		// codex-tui 的 DefaultPlatform/DefaultTerminal 现在是宿主机快照
+		// （internal/hostenv），宿主环境（如 Windows + 无 TERM）不一定落在目录的
+		// 观测列表里，故对 TUI 跳过"默认值必须是观测项"这条不变式；其他 kind
+		// 的目录默认值是固定观测数据，不变式保留。
+		if kind != CodexClientKindTUI {
+			if !codexUAHasPlatform(spec.Platforms, spec.DefaultPlatform) {
+				t.Fatalf("%s: default platform %+v is not an observed platform", kind, spec.DefaultPlatform)
+			}
+			if !codexUAHasOption(spec.Terminals, spec.DefaultTerminal) {
+				t.Fatalf("%s: default terminal %q is not an observed terminal", kind, spec.DefaultTerminal)
+			}
 		}
 		for _, p := range spec.Platforms {
 			if p.Weight <= 0 || !validCodexUserAgentPlatformPart(p.OSName) || !validCodexUserAgentPlatformPart(p.OSVersion) || !validCodexUserAgentToken(p.Arch) {
@@ -47,7 +53,7 @@ func TestCodexUACatalogIntegrity(t *testing.T) {
 			}
 		}
 	}
-	// TUI 默认值必须与历史常量一致,保证既有部署出站字节不变。
+	// TUI 默认值必须与宿主派生变量一致,保证既有部署出站字节跟随宿主机环境。
 	tui := codexUACatalog[CodexClientKindTUI]
 	if tui.DefaultPlatform.OSName != defaultCodexUserAgentOSName || tui.DefaultPlatform.OSVersion != defaultCodexUserAgentOSVersion || tui.DefaultPlatform.Arch != defaultCodexUserAgentArch || tui.DefaultTerminal != defaultCodexUserAgentTerminal {
 		t.Fatalf("codex-tui defaults drifted from legacy constants: %+v %q", tui.DefaultPlatform, tui.DefaultTerminal)
@@ -129,9 +135,9 @@ func TestBuildCodexStructuredUserAgentByKind(t *testing.T) {
 		{"exec preset follows cli", `{"client_kind":"codex-exec"}`,
 			"codex_exec/" + latestCodexCLIVersion + " (Windows 10.0.19045; x86_64) unknown (codex_exec; " + latestCodexCLIVersion + ")", latestCodexCLIVersion},
 		{"legacy tui config unchanged", `{"client_name":"codex-tui"}`,
-			"codex-tui/" + latestCodexCLIVersion + " (Mac OS 15.5.0; arm64) xterm-256color (codex-tui; " + latestCodexCLIVersion + ")", latestCodexCLIVersion},
+			"codex-tui/" + latestCodexCLIVersion + " (" + defaultCodexUserAgentOSName + " " + defaultCodexUserAgentOSVersion + "; " + defaultCodexUserAgentArch + ") " + defaultCodexUserAgentTerminal + " (codex-tui; " + latestCodexCLIVersion + ")", latestCodexCLIVersion},
 		{"custom keeps free-form marker", `{"client_kind":"custom","client_name":"my-router","app_name":"My App","app_version":"9.9"}`,
-			"my-router/" + latestCodexCLIVersion + " (Mac OS 15.5.0; arm64) xterm-256color (My App; 9.9)", latestCodexCLIVersion},
+			"my-router/" + latestCodexCLIVersion + " (" + defaultCodexUserAgentOSName + " " + defaultCodexUserAgentOSVersion + "; " + defaultCodexUserAgentArch + ") " + defaultCodexUserAgentTerminal + " (My App; 9.9)", latestCodexCLIVersion},
 		{"desktop with mac platform and explicit cli", `{"client_kind":"codex-desktop","client_version":"0.153.3","os_name":"Mac OS","os_version":"26.5.2","arch":"arm64"}`,
 			"Codex Desktop/0.153.3 (Mac OS 26.5.2; arm64) unknown (Codex Desktop; 26.901.41123)", "0.153.3"},
 	}

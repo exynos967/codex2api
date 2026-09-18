@@ -49,7 +49,8 @@ func maintenanceClientKey(account *auth.Account, proxyURL, transportMode, purpos
 // getMaintenanceClient 返回维护请求专用的池化 Client。
 //
 // forceUTLS=true 时无视 CODEX_TRANSPORT_MODE 强制使用 uTLS Chrome 指纹
-// （订阅端点在 Cloudflare 后面，普通指纹会被拦截）。
+// （订阅/邀请端点刻意使用浏览器 UA，浏览器 UA 必须配 Chrome 系 TLS 指纹才自洽；
+// Codex CLI 身份的端点不得走此路径——真实 Codex 是 rustls，见 auth.CodexRustlsClientHelloSpec）。
 func getMaintenanceClient(account *auth.Account, proxyURL, purpose string, forceUTLS bool) *http.Client {
 	transportMode := codexTransportModeFromEnv()
 	if forceUTLS {
@@ -92,7 +93,7 @@ func getMaintenanceClient(account *auth.Account, proxyURL, purpose string, force
 }
 
 // getCodexMaintenanceClient 是 wham / 模型清单 / alpha search 共用的池化 Client。
-// 走网关同款 transport（含 uTLS Chrome 指纹），与 /responses 的指纹保持一致。
+// 走网关同款 transport（默认 rustls 指纹），与 /responses 的指纹保持一致。
 func getCodexMaintenanceClient(account *auth.Account, proxyURL string) *http.Client {
 	return getMaintenanceClient(account, proxyURL, maintenancePurposeCodex, false)
 }

@@ -6,6 +6,8 @@ import (
 	"hash/fnv"
 	"sort"
 	"strings"
+
+	"github.com/codex2api/internal/hostenv"
 )
 
 // ==================== Codex 客户端形态目录 ====================
@@ -158,6 +160,26 @@ var codexUACatalog = map[CodexClientKind]*codexUAKindSpec{
 			{"NixOS", "26.5.0", "x86_64", 1},
 		},
 	},
+}
+
+// codexUAHostFamilyPlatforms 把平台候选约束到宿主机 OS 家族
+// （见 codexUAHostOnlyEnabled：TCP 指纹会暴露出口机器家族，跨家族画像自相矛盾）。
+// 过滤为空时回退全量，保证目录永远可抽样。
+func codexUAHostFamilyPlatforms(items []codexUAPlatform) []codexUAPlatform {
+	if !codexUAHostOnlyEnabled() {
+		return items
+	}
+	family := hostenv.Current().Family()
+	filtered := make([]codexUAPlatform, 0, len(items))
+	for _, p := range items {
+		if codexUAOSFamily(p.OSName) == family {
+			filtered = append(filtered, p)
+		}
+	}
+	if len(filtered) == 0 {
+		return items
+	}
+	return filtered
 }
 
 func codexUAKindSpecFor(kind CodexClientKind) (*codexUAKindSpec, bool) {
@@ -414,7 +436,7 @@ func codexPoolPersona(cfg CodexUserAgentConfig, accountID int64, versionFloor st
 	if !found {
 		return "", "", false
 	}
-	platform := pickCodexUAPlatform(spec.Platforms, "platform:"+seed)
+	platform := pickCodexUAPlatform(codexUAHostFamilyPlatforms(spec.Platforms), "platform:"+seed)
 	terminal := pickCodexUAWeighted(spec.Terminals, "terminal:"+seed)
 	appName := spec.ClientName
 	if !spec.AppFollowsCLI {

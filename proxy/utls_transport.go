@@ -18,13 +18,16 @@ import (
 	"golang.org/x/net/http2"
 	xproxy "golang.org/x/net/proxy"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/security"
 )
 
-// ==================== utls RoundTripper（Chrome 指纹 + HTTP/2） ====================
+// ==================== utls RoundTripper（可插拔 TLS 指纹 + HTTP/2） ====================
 //
 // 设计要点：
-//   - 使用 HelloChrome_Auto 模拟 Chrome 浏览器的 TLS 指纹
+//   - 默认 HelloChrome_Auto（Chrome 指纹）；传入 helloSpec 时用自定义指纹——
+//     Codex 流量用 auth.CodexRustlsClientHelloSpec（真实 Codex = rustls+aws_lc_rs，
+//     与 Chrome/Go 原生都不同的独立指纹族）
 //   - 支持 HTTP/2 协议（与 OpenAI/Anthropic API 兼容）
 //   - 连接池 + pending 管理：防止同一 host 重复创建连接
 //   - 代理支持：HTTP(S) 和 SOCKS5
@@ -84,12 +87,15 @@ func (c *utlsConn) reclaimable(now time.Time, grace time.Duration) bool {
 }
 
 // utlsRoundTripper 实现 http.RoundTripper 接口
-// 使用 utls 模拟 Chrome 浏览器的 TLS 指纹以绕过 TLS 指纹检测
+// 默认使用 HelloChrome_Auto 模拟浏览器 TLS 指纹；当 helloSpec 非空时改用
+// 自定义指纹（如 auth.CodexRustlsClientHelloSpec，与真实 Codex 客户端一致）。
 type utlsRoundTripper struct {
 	mu          sync.Mutex
 	connections map[string]*utlsConn  // HTTP/2 连接池，按 host 索引
 	pending     map[string]*sync.Cond // 防止重复连接创建
 	dialer      xproxy.Dialer         // 底层拨号器（支持代理）
+	helloSpec   func() *utls.ClientHelloSpec
+	plain       *http.Transport // http:// 明文上游回退（uTLS 只对 https 有意义）
 }
 
 // utlsSessionCache 在所有 uTLS 连接间共享 TLS 会话缓存，让重连走 TLS resumption。
@@ -99,6 +105,16 @@ var utlsSessionCache = utls.NewLRUClientSessionCache(256)
 // NewUTLSTransport 创建使用 Chrome TLS 指纹的 RoundTripper
 // 支持 HTTP(S) 和 SOCKS5 代理
 func NewUTLSTransport(proxyURL string) http.RoundTripper {
+	return newUTLSTransportWithSpec(proxyURL, nil)
+}
+
+// NewUTLSRustlsTransport 创建与真实 Codex 客户端（reqwest + rustls + aws_lc_rs）
+// TLS 指纹逐字节一致的 RoundTripper（指纹数据见 auth.CodexRustlsClientHelloSpec）。
+func NewUTLSRustlsTransport(proxyURL string) http.RoundTripper {
+	return newUTLSTransportWithSpec(proxyURL, auth.CodexRustlsClientHelloSpec)
+}
+
+func newUTLSTransportWithSpec(proxyURL string, helloSpec func() *utls.ClientHelloSpec) http.RoundTripper {
 	var dialer xproxy.Dialer = xproxy.Direct
 
 	if proxyURL != "" {
@@ -111,10 +127,24 @@ func NewUTLSTransport(proxyURL string) http.RoundTripper {
 		}
 	}
 
+	// http:// 明文上游（内网中转等）不经 uTLS：复用标准库 transport，
+	// 代理配置与 uTLS 路径同源。
+	plain := http.DefaultTransport.(*http.Transport).Clone()
+	plain.MaxIdleConnsPerHost = 4
+	plain.IdleConnTimeout = 90 * time.Second
+	plain.ResponseHeaderTimeout = 5 * time.Minute
+	plainBaseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	plain.DialContext = plainBaseDialer.DialContext
+	if err := auth.ConfigureTransportProxy(plain, proxyURL, plainBaseDialer); err != nil {
+		plain.Proxy = nil
+	}
+
 	return &utlsRoundTripper{
 		connections: make(map[string]*utlsConn),
 		pending:     make(map[string]*sync.Cond),
 		dialer:      dialer,
+		helloSpec:   helloSpec,
+		plain:       plain,
 	}
 }
 
@@ -323,7 +353,8 @@ func shutdownUTLSConn(conn *http2.ClientConn) {
 }
 
 // createConnection 创建新的 HTTP/2 连接
-// 使用 utls 的 HelloChrome_Auto 模拟 Chrome 浏览器的 TLS 指纹
+// TLS 指纹由 t.helloSpec 决定：空为 Chrome（浏览器 UA 场景），非空为自定义
+// （Codex 流量传 auth.CodexRustlsClientHelloSpec，与真实客户端一致）。
 func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
 	// 1. 建立 TCP 连接（通过代理或直连）
 	conn, err := t.dialer.Dial("tcp", addr)
@@ -331,14 +362,33 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, fmt.Errorf("TCP 连接失败: %w", err)
 	}
 
-	// 2. 配置 TLS（共享会话缓存，握手走 resumption 降低重连成本）
+// 2. 配置 TLS
 	tlsConfig := &utls.Config{
-		ServerName:         host,
-		ClientSessionCache: utlsSessionCache,
+		ServerName: host,
+	}
+	if t.helloSpec == nil {
+		// Chrome 指纹（浏览器 UA 场景）：共享会话缓存，重连走 resumption 降成本。
+		// Chrome spec 自带 PSK 扩展，resumption 安全。
+		tlsConfig.ClientSessionCache = utlsSessionCache
+	} else {
+		// rustls 指纹 spec 无 PreSharedKey 扩展：命中缓存会话时 utls 组装 PSK
+		// binder 会直接 panic。rustls 模式下彻底关闭 ticket 存储与恢复，
+		// 每次全新握手（连接池化后重连频率很低，成本可忽略）。
+		tlsConfig.SessionTicketsDisabled = true
 	}
 
-	// 3. 使用 utls 握手（Chrome 指纹）
-	tlsConn := utls.UClient(conn, tlsConfig, utls.HelloChrome_Auto)
+	// 3. 使用 utls 握手（默认 Chrome 指纹；helloSpec 非空时用自定义指纹，
+	// 如与真实 Codex 一致的 rustls 指纹）
+	var tlsConn *utls.UConn
+	if t.helloSpec != nil {
+		tlsConn = utls.UClient(conn, tlsConfig, utls.HelloCustom)
+		if err := tlsConn.ApplyPreset(t.helloSpec()); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("应用自定义 TLS 指纹失败: %w", err)
+		}
+	} else {
+		tlsConn = utls.UClient(conn, tlsConfig, utls.HelloChrome_Auto)
+	}
 
 	// 设置握手超时
 	handshakeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -373,6 +423,10 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 
 // RoundTrip 实现 http.RoundTripper 接口
 func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// http:// 明文上游（内网中转、httptest 等）不经 uTLS：强制 TLS 握手必然失败。
+	if strings.EqualFold(req.URL.Scheme, "http") {
+		return t.plain.RoundTrip(req)
+	}
 	host := req.URL.Host
 	addr := host
 	if !strings.Contains(addr, ":") {

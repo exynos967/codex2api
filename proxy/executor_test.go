@@ -440,8 +440,9 @@ func TestApplyCodexRequestHeadersUsesSessionIDWithoutConversationID(t *testing.T
 	if got := req.Header.Get("User-Agent"); got != cfg.UserAgent {
 		t.Fatalf("User-Agent = %q", got)
 	}
-	if got := req.Header.Get("Version"); got != "0.120.0" {
-		t.Fatalf("Version = %q", got)
+	// 直连上游不再发 Version 头：真实 codex-rs 全历史从未发送过。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 	if got := req.Header.Get("Originator"); got != Originator {
 		t.Fatalf("Originator = %q, want fallback %q", got, Originator)
@@ -782,8 +783,9 @@ func TestApplyCodexRequestHeadersUsesMinimalFallbackByDefault(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != defaultCodexCLIUserAgent {
 		t.Fatalf("User-Agent = %q, want minimal Codex CLI %q", got, defaultCodexCLIUserAgent)
 	}
-	if got := req.Header.Get("Version"); got != latestCodexCLIVersion {
-		t.Fatalf("Version = %q, want %q", got, latestCodexCLIVersion)
+	// 直连上游不再发 Version 头：版本信息只存在于 User-Agent。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 }
 
@@ -810,8 +812,9 @@ func TestApplyCodexRequestHeadersUsesCustomGeneratedUserAgentConfig(t *testing.T
 	if got := req.Header.Get("User-Agent"); got != wantUA {
 		t.Fatalf("User-Agent = %q, want %q", got, wantUA)
 	}
-	if got := req.Header.Get("Version"); got != "0.142.0-alpha.10" {
-		t.Fatalf("Version = %q, want 0.142.0-alpha.10", got)
+	// 直连上游不再发 Version 头。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 }
 
@@ -847,8 +850,9 @@ func TestApplyCodexRequestHeadersGeneratedDesktopClientSendsMatchingOriginator(t
 	if got := req.Header.Get("Originator"); got != "Codex Desktop" {
 		t.Fatalf("Originator = %q, want Codex Desktop to match generated User-Agent", got)
 	}
-	if got := req.Header.Get("Version"); got != "0.153.3" {
-		t.Fatalf("Version = %q, want 0.153.3", got)
+	// 直连上游不再发 Version 头。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 }
 
@@ -947,8 +951,9 @@ func TestApplyCodexRequestHeadersRaisesGeneratedUserAgentToAutoMinimum(t *testin
 	if got := req.Header.Get("User-Agent"); got != wantUA {
 		t.Fatalf("User-Agent = %q, want %q", got, wantUA)
 	}
-	if got := req.Header.Get("Version"); got != "0.150.0" {
-		t.Fatalf("Version = %q, want 0.150.0", got)
+	// 直连上游不再发 Version 头：抬版本的结果只体现在 User-Agent。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 }
 
@@ -964,8 +969,9 @@ func TestApplyCodexRequestHeadersRepairsBlankStabilizedProfileUserAgent(t *testi
 	if got := req.Header.Get("User-Agent"); got != defaultCodexCLIUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", got, defaultCodexCLIUserAgent)
 	}
-	if got := req.Header.Get("Version"); got != latestCodexCLIVersion {
-		t.Fatalf("Version = %q, want %q", got, latestCodexCLIVersion)
+	// 直连上游不再发 Version 头。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 }
 
@@ -996,8 +1002,10 @@ func TestApplyCodexRequestHeadersPreservesOfficialClientHeaders(t *testing.T) {
 	if got := req.Header.Get("Originator"); got != "codex_vscode" {
 		t.Fatalf("Originator = %q", got)
 	}
-	if got := req.Header.Get("Version"); got != "1.2.3" {
-		t.Fatalf("Version = %q", got)
+	// 直连上游不再发 Version 头，即使 preserve 模式下官方客户端自带——
+	// 真实 codex-rs 从未发送此头，透传反而成为指纹差异。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id"} {
 		if got := req.Header.Get(name); got != downstreamHeaders.Get(name) {
@@ -1032,8 +1040,9 @@ func TestApplyCodexRequestHeadersAutoDerivesVersionFromDesktopUserAgent(t *testi
 	if got := req.Header.Get("Originator"); got != "Codex Desktop" {
 		t.Fatalf("Originator = %q, want Codex Desktop", got)
 	}
-	if got := req.Header.Get("Version"); got != "0.153.3" {
-		t.Fatalf("Version = %q, want 0.153.3 derived from desktop User-Agent", got)
+	// 直连上游不再发 Version 头：桌面端版本只随 User-Agent 走。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 }
 
@@ -1062,8 +1071,9 @@ func TestApplyCodexRequestHeadersAutoUpgradesOldDesktopClient(t *testing.T) {
 	if got := req.Header.Get("Originator"); got != Originator {
 		t.Fatalf("Originator = %q, want generated client originator %q", got, Originator)
 	}
-	if got := req.Header.Get("Version"); got != "0.153.3" {
-		t.Fatalf("Version = %q, want auto minimum 0.153.3", got)
+	// 直连上游不再发 Version 头。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 }
 
@@ -1090,8 +1100,9 @@ func TestApplyCodexRequestHeadersAutoUpgradesOldCodexCLI(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got == downstreamHeaders.Get("User-Agent") {
 		t.Fatalf("User-Agent preserved old CLI UA %q", got)
 	}
-	if got := req.Header.Get("Version"); got != latestCodexCLIVersion {
-		t.Fatalf("Version = %q, want %q", got, latestCodexCLIVersion)
+	// 直连上游不再发 Version 头。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 }
 
@@ -1119,8 +1130,9 @@ func TestApplyCodexRequestHeadersAutoDoesNotUpgradeEmbeddedCodexToken(t *testing
 	if got := req.Header.Get("User-Agent"); got != spoofedUA {
 		t.Fatalf("User-Agent = %q, want legacy-preserved spoofed UA %q", got, spoofedUA)
 	}
-	if got := req.Header.Get("Version"); got != "0.117.0" {
-		t.Fatalf("Version = %q, want parsed legacy version 0.117.0", got)
+	// 直连上游不再发 Version 头，解析出的 legacy 版本不再外发。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 }
 
@@ -1143,8 +1155,9 @@ func TestApplyCodexRequestHeadersFallsBackForNonOfficialClient(t *testing.T) {
 	if got := req.Header.Get("Originator"); got != Originator {
 		t.Fatalf("Originator = %q, want %q", got, Originator)
 	}
-	if got := req.Header.Get("Version"); got != latestCodexCLIVersion {
-		t.Fatalf("Version = %q, want %q", got, latestCodexCLIVersion)
+	// 直连上游不再发 Version 头。
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 }
 
@@ -1675,10 +1688,17 @@ func TestExecuteOpenAIResponsesRequestRetriesForbiddenErrorOfficialClients(t *te
 	}
 }
 
-func TestCodexTransportModeDefaultsToStandard(t *testing.T) {
+func TestCodexTransportModeDefaultsToUTLSRustls(t *testing.T) {
 	t.Setenv("CODEX_TRANSPORT_MODE", "")
+	if _, ok := newCodexTransport("").(*utlsRoundTripper); !ok {
+		t.Fatalf("newCodexTransport default = %T, want *utlsRoundTripper (rustls 指纹)", newCodexTransport(""))
+	}
+}
+
+func TestCodexTransportModeCanUseStandard(t *testing.T) {
+	t.Setenv("CODEX_TRANSPORT_MODE", "standard")
 	if _, ok := newCodexTransport("").(*http.Transport); !ok {
-		t.Fatalf("newCodexTransport default = %T, want *http.Transport", newCodexTransport(""))
+		t.Fatalf("newCodexTransport standard = %T, want *http.Transport", newCodexTransport(""))
 	}
 }
 

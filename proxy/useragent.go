@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"os"
 	"strings"
 	"unicode"
+
+	"github.com/codex2api/internal/hostenv"
 )
 
 // ==================== 动态 User-Agent 生成 ====================
@@ -30,14 +33,21 @@ type ClientProfile struct {
 }
 
 const (
-	latestCodexClientName          = "codex-tui"
-	latestCodexCLIVersion          = "0.153.3"
-	latestCodexCLIUserAgentPrefix  = "codex-tui/" + latestCodexCLIVersion
-	defaultCodexUserAgentOSName    = "Mac OS"
-	defaultCodexUserAgentOSVersion = "15.5.0"
-	defaultCodexUserAgentArch      = "arm64"
-	defaultCodexUserAgentTerminal  = "xterm-256color"
-	defaultCodexCLIUserAgent       = latestCodexCLIUserAgentPrefix + " (Mac OS 15.5.0; arm64) xterm-256color (codex-tui; " + latestCodexCLIVersion + ")"
+	latestCodexClientName         = "codex-tui"
+	latestCodexCLIVersion         = "0.153.3"
+	latestCodexCLIUserAgentPrefix = "codex-tui/" + latestCodexCLIVersion
+)
+
+// 默认 UA 环境段取自宿主机启动快照（internal/hostenv），与真实 codex-rs 的
+// 构造方式同源（os_info + terminal-detection，default_client.rs）。
+// 为什么不能硬编码：被动 TCP 指纹（p0f 等）能识别出口机器的 OS 家族，
+// 在 Linux 服务器上自称 "Mac OS" 是应用层与传输层的直接矛盾——在哪部署就提取哪的。
+var (
+	defaultCodexUserAgentOSName    = hostenv.Current().OSName
+	defaultCodexUserAgentOSVersion = hostenv.Current().OSVersion
+	defaultCodexUserAgentArch      = hostenv.Current().Arch
+	defaultCodexUserAgentTerminal  = hostenv.Current().Terminal
+	defaultCodexCLIUserAgent       = latestCodexCLIUserAgentPrefix + " (" + hostenv.Current().CodexOSSegment() + ") " + hostenv.Current().Terminal + " (" + latestCodexClientName + "; " + latestCodexCLIVersion + ")"
 )
 
 type CodexUserAgentConfig struct {
@@ -149,7 +159,8 @@ func ApplyCodexModelDiscoveryHeaders(headers http.Header, seed string) {
 	}
 	version := effectiveLatestCodexCLIVersion()
 	headers.Set("User-Agent", replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, version))
-	headers.Set("Version", version)
+	// 不发 Version：真实 codex-rs（全 git 历史核验）任何请求都不带此头，
+	// 版本信息只存在于 User-Agent。
 	headers.Set("Originator", Originator)
 	seed = strings.TrimSpace(seed)
 	if seed == "" {
@@ -666,7 +677,8 @@ func matchCodexClientHeaderExact(value string, allowed []string) bool {
 }
 
 // 预定义的真实客户端画像池
-// 按开发者常见环境分布：macOS（主力） > Linux > Windows
+// 按开发者常见环境分布：macOS（主力） > Linux > Windows。
+// 默认只抽取与宿主机同 OS 家族的画像（见 codexUAHostOnlyEnabled）。
 var clientProfiles = []ClientProfile{
 	// ---- macOS arm64（最常见：Apple Silicon 开发者） ----
 	{codexProfileUserAgent("Mac OS", "15.5.0", "arm64", "xterm-256color"), latestCodexCLIVersion},
@@ -699,7 +711,8 @@ var clientProfiles = []ClientProfile{
 // ProfileForAccount 根据账号 ID 确定性地选择一个 ClientProfile
 // 同一个账号永远返回相同的 profile，不同账号大概率返回不同的 profile
 func ProfileForAccount(accountID int64) ClientProfile {
-	if len(clientProfiles) == 0 {
+	pool := codexHostFamilyClientProfiles()
+	if len(pool) == 0 {
 		return ClientProfile{
 			UserAgent: defaultCodexCLIUserAgent,
 			Version:   latestCodexCLIVersion,
@@ -709,10 +722,74 @@ func ProfileForAccount(accountID int64) ClientProfile {
 	// 用 FNV hash 将 accountID 映射到 profile 池，确保分布均匀
 	h := fnv.New32a()
 	fmt.Fprintf(h, "codex2api:ua-profile:%d", accountID)
-	idx := int(h.Sum32()) % len(clientProfiles)
+	idx := int(h.Sum32()) % len(pool)
 	if idx < 0 {
 		idx = -idx
 	}
 
-	return clientProfiles[idx]
+	return pool[idx]
+}
+
+// ==================== 宿主 OS 家族约束 ====================
+
+// codexUAHostOnlyEnabled 控制号池画像是否约束到宿主机 OS 家族（默认开启）。
+//
+// 被动 TCP 指纹（p0f 等）能识别出口机器的 OS 家族：Linux 服务器上跑出一批
+// "Mac OS" 账号画像，UA 与 TCP 栈直接矛盾。直连部署下家族约束是硬需求；
+// 全部账号都走住宅/第三方代理（出口 OS 由代理决定、与宿主机无关）时可
+// CODEX_UA_HOST_ONLY=0 关闭。
+func codexUAHostOnlyEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_UA_HOST_ONLY"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// codexUAOSFamily 把 UA 里的 OS 名归入家族："darwin" / "windows" / "linux"。
+// 覆盖目录与画像池里出现过的真实取值（Mac OS / Windows / Ubuntu / NixOS /
+// CentOS / Fedora / Arch / Linux / Debian 等）。
+func codexUAOSFamily(osName string) string {
+	s := strings.ToLower(strings.TrimSpace(osName))
+	switch {
+	case strings.Contains(s, "mac os"):
+		return "darwin"
+	case strings.HasPrefix(s, "windows"):
+		return "windows"
+	default:
+		return "linux"
+	}
+}
+
+// codexUAProfileOSFamily 从已拼好的画像 UA 里提取 OS 家族（"({os}; {arch})" 段）。
+func codexUAProfileOSFamily(userAgent string) string {
+	start := strings.IndexByte(userAgent, '(')
+	if start < 0 {
+		return ""
+	}
+	segment := userAgent[start+1:]
+	if end := strings.IndexByte(segment, ';'); end >= 0 {
+		segment = segment[:end]
+	}
+	return codexUAOSFamily(segment)
+}
+
+// codexHostFamilyClientProfiles 返回与宿主机同 OS 家族的画像池；
+// 过滤为空（目录未收录该家族）时回退全量，保证号池永远可用。
+func codexHostFamilyClientProfiles() []ClientProfile {
+	if !codexUAHostOnlyEnabled() {
+		return clientProfiles
+	}
+	family := hostenv.Current().Family()
+	filtered := make([]ClientProfile, 0, len(clientProfiles))
+	for _, p := range clientProfiles {
+		if codexUAProfileOSFamily(p.UserAgent) == family {
+			filtered = append(filtered, p)
+		}
+	}
+	if len(filtered) == 0 {
+		return clientProfiles
+	}
+	return filtered
 }

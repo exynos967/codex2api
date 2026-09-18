@@ -150,20 +150,18 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 	if deviceCfg == nil {
 		deviceCfg = &DeviceProfileConfig{StabilizeDeviceProfile: false}
 	}
-	userAgent, version := ResolveCodexOutboundClientHeaders(account, apiKey, deviceCfg, downstreamHeaders)
+	userAgent, _ := ResolveCodexOutboundClientHeaders(account, apiKey, deviceCfg, downstreamHeaders)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Originator", Originator)
-	if version != "" {
-		req.Header.Set("Version", version)
-	}
+	// 不发 Version：真实 codex-rs 任何请求都不带此头。
 	if accountID := account.EffectiveAccountID(); accountID != "" {
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
 
-	// 复用网关同款 transport（支持 uTLS Chrome 指纹），与 /responses、清单透传一致。
+	// 复用网关同款 transport（默认 rustls 指纹），与 /responses、清单透传一致。
 	// 池化而非每次新建，避免一次性 uTLS transport 泄漏连接（issue #446）。
 	client := getCodexMaintenanceClient(account, proxyURL)
 	resp, err := executeHTTPWithContinuousRetryKeepalive(reqCtx, func() (*http.Response, error) {

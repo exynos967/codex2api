@@ -15,13 +15,18 @@ import (
 )
 
 const (
-	defaultDeviceProfileUserAgent      = defaultCodexCLIUserAgent
 	defaultDeviceProfilePackageVersion = latestCodexCLIVersion
 	defaultDeviceProfileRuntimeVersion = latestCodexCLIVersion
-	defaultDeviceProfileOS             = "MacOS"
-	defaultDeviceProfileArch           = "arm64"
 	deviceProfileTTL                   = 7 * 24 * time.Hour
 	deviceProfileCleanupPeriod         = time.Hour
+)
+
+var (
+	defaultDeviceProfileUserAgent = defaultCodexCLIUserAgent
+	// 默认设备画像的 OS/Arch 跟随宿主机（Stainless 命名），与 UA 环境段同一来源：
+	// 自称 Mac 而宿主机是 Linux 时，X-Stainless-Os 与 UA、TCP 栈三方互相矛盾。
+	defaultDeviceProfileOS   = mapStainlessOS()
+	defaultDeviceProfileArch = mapStainlessArch()
 )
 
 var (

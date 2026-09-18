@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Codex egress now speaks the real client's TLS fingerprint by default, and the client persona follows the host machine.** The default `CODEX_TRANSPORT_MODE` is now `utls_rustls`: a uTLS ClientHello that replays the rustls + aws-lc-rs shape used by the real Codex CLI (verified byte-for-byte against a live capture of a reqwest 0.12 / rustls 0.23.45 probe — cipher order `AES-256-GCM → AES-128-GCM → CHACHA20` with the renegotiation SCSV, the exact extension set, `h2, http/1.1` ALPN, no GREASE), including rustls's per-handshake extension-order shuffling (`order_seed` in rustls 0.23.31+). X25519MLKEM768 is deliberately omitted from `supported_groups`: uTLS cannot answer the HelloRetryRequest that MLKEM-capable peers (Cloudflare) issue when the curve is advertised without a share, so the profile tracks the equally real rustls + ring provider family instead. The auth-token endpoints switched from a Chrome parrot to the same rustls profile (the real client's OAuth calls are reqwest too, not a browser); subscription/invite maintenance endpoints keep the Chrome parrot because they intentionally use a browser UA. `standard` (Go native TLS) and `utls_chrome` remain selectable for rollback and comparison.
+
+- **Default Codex User-Agent environment segment and device profile now come from the deployment host (`internal/hostenv`).** The OS name / version (os_info semantics: `/etc/os-release` NAME + semanticized VERSION_ID on Linux, `sw_vers` on macOS, `RtlGetVersion` on Windows), architecture (os_info naming) and terminal token (same probe order as codex-rs terminal-detection) are snapshotted once at startup, replacing the hardcoded `Mac OS 15.5.0; arm64` persona. Passive TCP fingerprinting (p0f) reveals the egress machine's OS family, so a pool of "Mac" accounts on a Linux VPS contradicted itself at the transport layer; persona pools (`ProfileForAccount` and catalog pool sampling) are now constrained to the host's OS family by default — set `CODEX_UA_HOST_ONLY=0` when every account exits through residential/third-party proxies whose egress OS the gateway does not control.
+
+### Fixes
+
+- **Direct chatgpt.com paths no longer send the `Version` header.** A full git-history check of codex-rs shows the real client has never sent `Version` on any request — `/responses`, compact, WebSocket handshake, models manifest, alpha search, Live and model discovery included — so injecting it produced a header set no real client generates. The relay path (`applyOpenAIResponsesRequestHeaders`) keeps `Version` / `x-codex-app-version` because third-party relays gate on them (cockpit-tools issue #1892).
+
 ## v2.9.8 - 2026-09-16
 
 ### Features

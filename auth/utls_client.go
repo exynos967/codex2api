@@ -20,8 +20,9 @@ import (
 	"github.com/codex2api/security"
 )
 
-// utlsAuthRoundTripper 使用 Chrome TLS 指纹的 http.RoundTripper，
-// 专门用于 chatgpt.com 等受 Cloudflare 保护的 auth 端点。
+// utlsAuthRoundTripper 使用与真实 Codex 客户端一致的 rustls TLS 指纹
+// （CodexRustlsClientHelloSpec）的 http.RoundTripper，
+// 专门用于 chatgpt.com / auth.openai.com 等 auth 端点。
 type utlsAuthRoundTripper struct {
 	mu          sync.Mutex
 	connections map[string]*http2.ClientConn
@@ -104,7 +105,13 @@ func (t *utlsAuthRoundTripper) createConnection(host, addr string) (*http2.Clien
 	}
 
 	tlsConfig := &utls.Config{ServerName: host}
-	tlsConn := utls.UClient(conn, tlsConfig, utls.HelloChrome_Auto)
+	// 与真实 Codex 客户端一致：auth 端点（OAuth 换 token / 刷新）走的也是
+	// reqwest + rustls + aws_lc_rs，不是浏览器——Chrome 指纹在此是自报假身份。
+	tlsConn := utls.UClient(conn, tlsConfig, utls.HelloCustom)
+	if err := tlsConn.ApplyPreset(CodexRustlsClientHelloSpec()); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("应用 rustls TLS 指纹失败: %w", err)
+	}
 
 	handshakeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -323,8 +330,8 @@ func evictExpiredUTLSAuthClients() {
 	})
 }
 
-// buildUTLSHTTPClient 构建使用 Chrome TLS 指纹的 HTTP 客户端（连接池复用）。
-// 用于请求受 Cloudflare 保护的 chatgpt.com 端点。
+// buildUTLSHTTPClient 构建使用 rustls TLS 指纹的 HTTP 客户端（连接池复用）。
+// 用于请求 chatgpt.com / auth.openai.com 端点。
 func buildUTLSHTTPClient(proxyURL string) *http.Client {
 	if v, ok := utlsAuthClientPool.Load(proxyURL); ok {
 		entry := v.(*utlsAuthPoolEntry)

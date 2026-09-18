@@ -330,12 +330,10 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 		if account == nil {
 			account = &auth.Account{AccountID: accountID}
 		}
-		var userAgent, version string
-		userAgent, version, usedGeneratedHeaders = proxy.ResolveCodexOutboundClientHeadersWithDecision(account, apiKey, deviceCfg, ginHeaders)
+		var userAgent string
+		userAgent, _, usedGeneratedHeaders = proxy.ResolveCodexOutboundClientHeadersWithDecision(account, apiKey, deviceCfg, ginHeaders)
 		headers.Set("User-Agent", userAgent)
-		if version != "" {
-			headers.Set("Version", version)
-		}
+		// 不发 Version：真实 codex-rs 的 WS 握手同样不带此头。
 	} else {
 		// Keep an explicit empty header entry so net/http Request.Write suppresses
 		// its implicit Go-http-client/1.1 fallback during the WS handshake.

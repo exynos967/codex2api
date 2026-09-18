@@ -52,8 +52,9 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 	if got := headers.Get("User-Agent"); got != cfg.UserAgent {
 		t.Fatalf("User-Agent = %q", got)
 	}
-	if got := headers.Get("Version"); got != "0.120.0" {
-		t.Fatalf("Version = %q", got)
+	// 直连上游不再发 Version 头：真实 codex-rs 的 WS 握手从未携带此头。
+	if got := headers.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 	if got := headers.Get("Originator"); got != proxy.Originator {
 		t.Fatalf("Originator = %q", got)
@@ -159,8 +160,9 @@ func TestPrepareWebsocketHeadersSendsUserAgentByDefault(t *testing.T) {
 	if got := headers.Get("User-Agent"); got != proxy.MinimalCodexCLIUserAgentForHeaders() {
 		t.Fatalf("User-Agent = %q, want %q", got, proxy.MinimalCodexCLIUserAgentForHeaders())
 	}
-	if got := headers.Get("Version"); got != proxy.LatestCodexCLIVersionForHeaders() {
-		t.Fatalf("Version = %q, want %q", got, proxy.LatestCodexCLIVersionForHeaders())
+	// 直连上游不再发 Version 头：真实 codex-rs 全历史从未发送过。
+	if got := headers.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 	if got := headers.Get("OpenAI-Beta"); got != responsesWebsocketBetaHeader {
 		t.Fatalf("OpenAI-Beta = %q", got)
@@ -223,8 +225,9 @@ func TestPrepareWebsocketHeadersHonorsForcedGeneratedUserAgent(t *testing.T) {
 	if !strings.HasPrefix(got, "codex-tui/") || !strings.Contains(got, " (") {
 		t.Fatalf("User-Agent = %q, want generated full codex-tui profile", got)
 	}
-	if version := headers.Get("Version"); version != proxy.LatestCodexCLIVersionForHeaders() {
-		t.Fatalf("Version = %q, want %q", version, proxy.LatestCodexCLIVersionForHeaders())
+	// 直连上游不再发 Version 头，即使下游客户端自带。
+	if version := headers.Get("Version"); version != "" {
+		t.Fatalf("Version = %q, want empty", version)
 	}
 	if originator := headers.Get("Originator"); originator != proxy.Originator {
 		t.Fatalf("Originator = %q, want %q", originator, proxy.Originator)
@@ -662,7 +665,8 @@ func TestPrepareWebsocketHeadersGeneratedDesktopClientSendsMatchingOriginator(t 
 	if got := headers.Get("Originator"); got != "Codex Desktop" {
 		t.Fatalf("Originator = %q, want Codex Desktop to match generated User-Agent", got)
 	}
-	if got := headers.Get("Version"); got != "0.153.3" {
-		t.Fatalf("Version = %q, want 0.153.3", got)
+	// 直连上游不再发 Version 头：版本信息只存在于 User-Agent。
+	if got := headers.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
 	}
 }

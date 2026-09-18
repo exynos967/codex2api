@@ -483,11 +483,10 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	// UA 版本段与 Version 头、client_version query 三者保持同一版本，
-	// 避免出站身份自相矛盾（UA 钉内置常量、Version 跟随同步值）。
+	// UA 版本段与 client_version query 保持同一版本（真实 codex-rs 的
+	// models-manager 请求形态）；不发 Version 头——真实客户端任何请求都不带。
 	req.Header.Set("User-Agent", replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, clientVersion))
 	req.Header.Set("Originator", Originator)
-	req.Header.Set("Version", clientVersion)
 	if ifNoneMatch = strings.TrimSpace(ifNoneMatch); ifNoneMatch != "" {
 		req.Header.Set("If-None-Match", ifNoneMatch)
 	}
@@ -496,7 +495,7 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
 
-	// 复用网关同款 transport（支持 uTLS Chrome 指纹），与 /responses、wham 一致。
+	// 复用网关同款 transport（默认 rustls 指纹），与 /responses、wham 一致。
 	// 池化而非每次新建：Codex 客户端会周期性拉取清单，一次性 uTLS transport
 	// 会把连接与 goroutine 持续泄漏到进程结束（issue #446）。
 	client := getCodexMaintenanceClient(account, proxyURL)
