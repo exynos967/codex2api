@@ -159,14 +159,21 @@ func TestFirstCodexTurnStateModel(t *testing.T) {
 	}
 }
 
-// waitRefineExit 轮询死磕循环退出（循环在拿到 292 / 被停 / 账号消失时自行退出）。
-func waitRefineExit(t *testing.T, h *Handler, id int64) {
+// waitRefineStopped 轮询死磕循环真正退出（goroutine 结束、两个槽位都清空）。
+// 不能只看 CodexTurnStateRefining：Stop 同步删 refine 条目后循环还在收尾，
+// 测试提前结束会让 defer 恢复全局变量与循环读取撞出竞态（CI race 实测）。
+func waitRefineStopped(t *testing.T, h *Handler, id int64) {
 	t.Helper()
-	for i := 0; i < 500; i++ {
-		if !h.CodexTurnStateRefining(id) {
+	r := h.turnStateRefresher()
+	for i := 0; i < 1000; i++ {
+		r.mu.Lock()
+		_, running := r.running[id]
+		_, refining := r.refine[id]
+		r.mu.Unlock()
+		if !running && !refining {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatalf("死磕循环未在预期时间内退出")
 }
@@ -205,7 +212,7 @@ func TestCodexTurnStateRefinePins292AndExits(t *testing.T) {
 	if !h.StartCodexTurnStateRefine(account) {
 		t.Fatal("重复启动应幂等返回 true")
 	}
-	waitRefineExit(t, h, account.ID())
+	waitRefineStopped(t, h, account.ID())
 	if got := atomic.LoadInt32(&calls); got != 4 {
 		t.Errorf("探测次数 = %d, want 4（3 次 312 后第 4 次拿 292 退出）", got)
 	}
@@ -243,7 +250,7 @@ func TestCodexTurnStateRefineStopsOnDemand(t *testing.T) {
 	if h.StopCodexTurnStateRefine(account.ID()) {
 		t.Fatal("循环已停后 Stop 应返回 false")
 	}
-	waitRefineExit(t, h, account.ID())
+	waitRefineStopped(t, h, account.ID())
 }
 
 // TestCodexTurnStateRefineSwitchOffExits 开关被关（PATCH 保存 false）后循环自行退出。
@@ -270,6 +277,6 @@ func TestCodexTurnStateRefineSwitchOffExits(t *testing.T) {
 	account.Mu().Lock()
 	account.CodexTurnStateRefineEnabled = false
 	account.Mu().Unlock()
-	waitRefineExit(t, h, account.ID())
+	waitRefineStopped(t, h, account.ID())
 }
 

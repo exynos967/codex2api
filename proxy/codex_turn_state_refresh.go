@@ -363,6 +363,11 @@ func (h *Handler) StopCodexTurnStateRefine(accountID int64) bool {
 	r := h.turnStateRefresher()
 	r.mu.Lock()
 	cancel, ok := r.refine[accountID]
+	if ok {
+		// 同步删条目再 cancel：不这么做，循环 goroutine 的 defer 清理之前
+		// 重复 Stop 会再次命中旧条目、谎报"又停了一次"（CI 实测竞态）。
+		delete(r.refine, accountID)
+	}
 	r.mu.Unlock()
 	if !ok {
 		return false
