@@ -52,9 +52,10 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 	if got := headers.Get("User-Agent"); got != cfg.UserAgent {
 		t.Fatalf("User-Agent = %q", got)
 	}
-	// 直连上游不再发 Version 头：真实 codex-rs 的 WS 握手从未携带此头。
-	if got := headers.Get("Version"); got != "" {
-		t.Fatalf("Version = %q, want empty", got)
+	// 真实 codex 0.155 的 WS 握手带 Version 头且与 UA 版本同值（抓包实证；
+	// SSE POST /responses 反而不带——端点行为不同）。
+	if got := headers.Get("Version"); got == "" {
+		t.Fatalf("Version 不应为空（真实 0.155 WS 握手携带）")
 	}
 	if got := headers.Get("Originator"); got != proxy.Originator {
 		t.Fatalf("Originator = %q", got)
@@ -160,9 +161,9 @@ func TestPrepareWebsocketHeadersSendsUserAgentByDefault(t *testing.T) {
 	if got := headers.Get("User-Agent"); got != proxy.MinimalCodexCLIUserAgentForHeaders() {
 		t.Fatalf("User-Agent = %q, want %q", got, proxy.MinimalCodexCLIUserAgentForHeaders())
 	}
-	// 直连上游不再发 Version 头：真实 codex-rs 全历史从未发送过。
-	if got := headers.Get("Version"); got != "" {
-		t.Fatalf("Version = %q, want empty", got)
+	// 直连上游的 WS 握手带 Version 头（0.155 实测抓包），与 UA 版本同源。
+	if got := headers.Get("Version"); got == "" {
+		t.Fatalf("Version 不应为空（真实 0.155 WS 握手携带）")
 	}
 	if got := headers.Get("OpenAI-Beta"); got != responsesWebsocketBetaHeader {
 		t.Fatalf("OpenAI-Beta = %q", got)
@@ -225,9 +226,9 @@ func TestPrepareWebsocketHeadersHonorsForcedGeneratedUserAgent(t *testing.T) {
 	if !strings.HasPrefix(got, "codex-tui/") || !strings.Contains(got, " (") {
 		t.Fatalf("User-Agent = %q, want generated full codex-tui profile", got)
 	}
-	// 直连上游不再发 Version 头，即使下游客户端自带。
-	if version := headers.Get("Version"); version != "" {
-		t.Fatalf("Version = %q, want empty", version)
+	// 直连上游的 WS 握手带 Version 头（0.155 实测抓包），与生成 UA 的版本同值。
+	if version := headers.Get("Version"); version == "" {
+		t.Fatalf("Version 不应为空（真实 0.155 WS 握手携带）")
 	}
 	if originator := headers.Get("Originator"); originator != proxy.Originator {
 		t.Fatalf("Originator = %q, want %q", originator, proxy.Originator)
@@ -665,8 +666,8 @@ func TestPrepareWebsocketHeadersGeneratedDesktopClientSendsMatchingOriginator(t 
 	if got := headers.Get("Originator"); got != "Codex Desktop" {
 		t.Fatalf("Originator = %q, want Codex Desktop to match generated User-Agent", got)
 	}
-	// 直连上游不再发 Version 头：版本信息只存在于 User-Agent。
-	if got := headers.Get("Version"); got != "" {
-		t.Fatalf("Version = %q, want empty", got)
+	// 直连上游的 WS 握手带 Version 头（0.155 实测抓包），版本与 UA 同源。
+	if got := headers.Get("Version"); got == "" {
+		t.Fatalf("Version 不应为空（真实 0.155 WS 握手携带）")
 	}
 }

@@ -1225,11 +1225,11 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	// 而 Codex 官方上游走的就是 h2——Go 的 http2 transport 会把它剥掉，剥不掉的代理
 	// 链路上它则是个真实客户端不会有的多余头。真实 Codex 用 reqwest，同样不发。
 	//
-	// 同样不发 Version：真实 codex-rs（全 git 历史核验）从未向 /backend-api/codex
-	// 发送 Version 头，版本信息只存在于 User-Agent。多发一个真实客户端没有的头，
-	// 本身就是上游指纹系统可利用的差异。中转路径（applyOpenAIResponsesRequestHeaders）
-	// 的 Version / x-codex-app-version 是第三方中转的准入约定（cockpit-tools
-	// issue #1892），与 chatgpt.com 直连无关，不受此约束。
+	// 同样不发 Version：0.155 实测抓包（tlsprobe/codex-sse.flows）确认 SSE POST
+	// /responses 不带此头——注意端点差异：WS 握手与 models GET 反而都带，
+	// 两条路径各自按真身处理，不要互相看齐。中转路径
+	// （applyOpenAIResponsesRequestHeaders）的 Version / x-codex-app-version 是
+	// 第三方中转的准入约定（cockpit-tools issue #1892），与 chatgpt.com 直连无关。
 	// Originator 必须与出站 UA 的客户端前缀一致：网关自行生成 UA 时跟随生成结果
 	// （模拟 "Codex Desktop" 就发 "Codex Desktop"），透传官方客户端时沿用下游值。
 	if usedGeneratedHeaders {

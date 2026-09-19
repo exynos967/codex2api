@@ -184,10 +184,10 @@ func TestFetchCodexModelsManifest_PassesThroughBodyAndETag(t *testing.T) {
 		if !strings.HasPrefix(r.Header.Get("User-Agent"), "codex-tui/") {
 			t.Errorf("User-Agent = %q, want codex-tui prefix", r.Header.Get("User-Agent"))
 		}
-		// 直连上游不再发 Version 头（真实 codex-rs 从未发送），版本只走
-		// client_version 查询参数与 User-Agent。
-		if got := r.Header.Get("Version"); got != "" {
-			t.Errorf("Version = %q, want empty", got)
+		// 直连 models 带 Version 头且与 client_version 同值（0.155 实测抓包；
+		// SSE POST /responses 反而不带——端点行为不同）。
+		if got := r.Header.Get("Version"); got != "0.140.0" {
+			t.Errorf("Version = %q, want 0.140.0", got)
 		}
 		if got := r.URL.Query().Get("client_version"); got != "0.140.0" {
 			t.Errorf("client_version = %q, want 0.140.0", got)

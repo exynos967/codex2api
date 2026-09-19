@@ -482,9 +482,11 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 		return nil, fmt.Errorf("build codex models request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "application/json")
-	// UA 版本段与 client_version query 保持同一版本（真实 codex-rs 的
-	// models-manager 请求形态）；不发 Version 头——真实客户端任何请求都不带。
+	// 真实 codex 0.155 的 models 请求形态（抓包 tlsprobe/codex.flows）：
+	// version 头与 client_version query 同值、accept 为 */*；UA 版本段同源。
+	// 注意端点差异：WS 握手同样带 version，SSE POST /responses 反而不带。
+	req.Header.Set("Version", clientVersion)
+	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, clientVersion))
 	req.Header.Set("Originator", Originator)
 	if ifNoneMatch = strings.TrimSpace(ifNoneMatch); ifNoneMatch != "" {

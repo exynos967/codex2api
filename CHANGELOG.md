@@ -16,7 +16,7 @@
 
 ### Fixes
 
-- **Direct chatgpt.com paths no longer send the `Version` header.** A full git-history check of codex-rs shows the real client has never sent `Version` on any request — `/responses`, compact, WebSocket handshake, models manifest, alpha search, Live and model discovery included — so injecting it produced a header set no real client generates. The relay path (`applyOpenAIResponsesRequestHeaders`) keeps `Version` / `x-codex-app-version` because third-party relays gate on them (cockpit-tools issue #1892).
+- **The `Version` header is now per-endpoint, matching a live capture of real codex-cli 0.155.0.** The earlier "real clients never send `Version`" rule (from a codex-rs git-history check) was disproven on the wire: the WebSocket handshake and the models-manifest GET both send `version: <cli>` (first header on the models request), while the SSE `POST /responses` does not. The gateway now mirrors that split exactly — WS handshake and models GET carry `Version` (same value as the UA / `client_version` query), SSE POST stays without it; the models request's `Accept` was also corrected to the real `*/*`. The relay path (`applyOpenAIResponsesRequestHeaders`) keeps `Version` / `x-codex-app-version` because third-party relays gate on them (cockpit-tools issue #1892).
 
 ## v2.9.8 - 2026-09-16
 

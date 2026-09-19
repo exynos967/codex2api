@@ -330,10 +330,14 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 		if account == nil {
 			account = &auth.Account{AccountID: accountID}
 		}
-		var userAgent string
-		userAgent, _, usedGeneratedHeaders = proxy.ResolveCodexOutboundClientHeadersWithDecision(account, apiKey, deviceCfg, ginHeaders)
+		var userAgent, version string
+		userAgent, version, usedGeneratedHeaders = proxy.ResolveCodexOutboundClientHeadersWithDecision(account, apiKey, deviceCfg, ginHeaders)
 		headers.Set("User-Agent", userAgent)
-		// 不发 Version：真实 codex-rs 的 WS 握手同样不带此头。
+		// 真实 codex 0.155 的 WS 握手带 version 头（SSE POST 反而不带——
+		// 端点行为不同，勿两边对齐）。抓包证据：tlsprobe/codex.flows。
+		if version != "" {
+			headers.Set("Version", version)
+		}
 	} else {
 		// Keep an explicit empty header entry so net/http Request.Write suppresses
 		// its implicit Go-http-client/1.1 fallback during the WS handshake.
