@@ -392,6 +392,32 @@ func (h *Handler) CodexTurnStateRefining(accountID int64) bool {
 // refineTurnStateLoop 死磕循环体：拿到 292 固定后退出；账号被删/开关被关/
 // 被取消时退出；配置类守卫失败（无 token、无模型名单）也退出并留日志——
 // 那种情况循环一万次也不会好，等运维改完配置重开。
+// codexTurnStateRefineParallel 死磕单轮并发探测数。轮换代理池每次连接换出口
+// IP，N 并发等于一轮同时试 N 个 IP，撞上健康出口的耗时约缩到 1/N——这正是
+// 死磕模式的意义所在（额度总消耗与串行相当：都是打到命中为止）。
+// CODEX_TURN_STATE_REFINE_PARALLEL 可调（1-8，默认 8；1 = 退回串行形态）。
+func codexTurnStateRefineParallel() int {
+	raw := strings.TrimSpace(os.Getenv("CODEX_TURN_STATE_REFINE_PARALLEL"))
+	if raw == "" {
+		return 8
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 8
+	}
+	if n > 8 {
+		return 8
+	}
+	return n
+}
+
+// refineProbeOutcome 一发并发探测的结果。
+type refineProbeOutcome struct {
+	state  string
+	status int
+	err    error
+}
+
 func (h *Handler) refineTurnStateLoop(ctx context.Context, accountID int64) {
 	r := h.turnStateRefresher()
 	defer func() {
@@ -401,19 +427,21 @@ func (h *Handler) refineTurnStateLoop(ctx context.Context, accountID int64) {
 		r.mu.Unlock()
 	}()
 
-	attempt := 0
+	parallel := codexTurnStateRefineParallel()
+	round := 0
+	totalProbes := 0
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		if attempt > 0 {
+		if round > 0 {
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(codexTurnStateProbeDelay):
 			}
 		}
-		attempt++
+		round++
 
 		account := h.store.FindByID(accountID)
 		if account == nil {
@@ -448,26 +476,63 @@ func (h *Handler) refineTurnStateLoop(ctx context.Context, accountID int64) {
 			proxyURL = accountProxy
 		}
 
-		state, status, err := h.probeCodexTurnState(ctx, account, accessToken, model, proxyURL)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("[turn-state-refresh] account=%d 死磕第 %d 次探测失败: %v", accountID, attempt, err)
-			continue
+		// 一轮并发探测：N 个 worker 各发一发，先中 292 者胜——命中即 cancel
+		// 让在途的败者尽快收手（探测走同一 ctx，取消会中止在途请求）。
+		roundCtx, cancelRound := context.WithCancel(ctx)
+		results := make(chan refineProbeOutcome, parallel)
+		var wg sync.WaitGroup
+		for i := 0; i < parallel; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				state, status, err := h.probeCodexTurnState(roundCtx, account, accessToken, model, proxyURL)
+				results <- refineProbeOutcome{state: state, status: status, err: err}
+			}()
 		}
-		switch len(state) {
-		case auth.CodexTurnStateGoodLength:
-			if err := h.store.ApplyCodexTurnStateRefreshResult(context.Background(), accountID, state); err != nil {
+		var hit string
+		var lastErr error
+		degraded, empty, other := 0, 0, 0
+		for i := 0; i < parallel; i++ {
+			out := <-results
+			if out.err != nil {
+				if lastErr == nil && roundCtx.Err() == nil {
+					lastErr = out.err
+				}
+				continue
+			}
+			switch len(out.state) {
+			case auth.CodexTurnStateGoodLength:
+				if hit == "" {
+					hit = out.state
+					cancelRound()
+				}
+			case auth.CodexTurnStateDegradedLength:
+				degraded++
+			case 0:
+				empty++
+			default:
+				other++
+			}
+		}
+		wg.Wait()
+		cancelRound()
+		totalProbes += parallel
+
+		if hit != "" {
+			if err := h.store.ApplyCodexTurnStateRefreshResult(context.Background(), accountID, hit); err != nil {
 				log.Printf("[turn-state-refresh] account=%d 死磕拿到 292 但回写失败: %v", accountID, err)
 				return
 			}
-			log.Printf("[turn-state-refresh] account=%d model=%s 死磕第 %d 次探测固定 292 token，循环退出", accountID, model, attempt)
+			log.Printf("[turn-state-refresh] account=%d model=%s 死磕第 %d 轮（累计 %d 发）固定 292 token，循环退出", accountID, model, round, totalProbes)
 			return
-		case auth.CodexTurnStateDegradedLength:
-			// 降智形态：继续磨，换下一个出口 IP。
-		default:
-			log.Printf("[turn-state-refresh] account=%d 死磕第 %d 次探测返回长度 %d（HTTP %d）", accountID, attempt, len(state), status)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if lastErr != nil {
+			log.Printf("[turn-state-refresh] account=%d 死磕第 %d 轮（%d 并发）探测失败: %v", accountID, round, parallel, lastErr)
+		} else {
+			log.Printf("[turn-state-refresh] account=%d 死磕第 %d 轮（%d 并发）未中：312=%d 空=%d 其他=%d", accountID, round, parallel, degraded, empty, other)
 		}
 	}
 }

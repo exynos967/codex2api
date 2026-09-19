@@ -84,6 +84,7 @@ Codex2API 采用三层配置架构：
 | `CODEX_UA_HOST_ONLY` | 否 | `true` | 号池画像是否约束到宿主机 OS 家族（linux/darwin/windows）。被动 TCP 指纹能识别出口机器家族，跨家族画像（Linux 服务器冒出 "Mac OS" 账号）与应用层自相矛盾；全部账号经住宅/第三方代理出口时可设为 `0` 关闭 |
 | `CODEX_TURN_STATE_REFRESH_INTERVAL` | 否 | `45m` | turn-state 自动刷新巡检周期（Go duration）；`0` 关闭周期巡检（账号级开关开启时，观测到降智 312 token 的反应式刷新与手动刷新仍有效）。开启刷新的账号经其专用探测代理（`codex_turn_state_refresh_proxy`，用于更换出口 IP）向上游探测，只固定 292 字节的非降智 token 并回写注入值；312 为 IP 绑定的降智形态，拿到说明代理出口需要更换 |
 | `CODEX_TURN_STATE_REFRESH_ATTEMPTS` | 否 | `8` | 单次刷新触发内的最大探测次数（上限 30）。轮换代理池（每次连接换出口 IP，含纯 IPv6 池，URL 用 `[v6]:port` 方括号写法）下连探几次即应撞上正常出口；拿到 292 立即停止。探测是真实请求会烧少量 token，故必须封顶 |
+| `CODEX_TURN_STATE_REFINE_PARALLEL` | 否 | `8` | 死磕刷新（`codex_turn_state_refine_enabled`）单轮并发探测数（1-8）。轮换代理池下 N 并发等于一轮同时试 N 个出口 IP，命中 292 即取消其余在途探测；`1` 退回串行形态。额度总消耗与串行相当（都是打到命中为止），仅缩短耗时 |
 | `CODEX_SESSION_HEADER_ALIGN_CONVERGED` | 否 | `false` | 开启后 `session-id` 头改用指纹收敛后的会话身份，与 turn metadata 的 `session_id` 对齐。默认关：请求体 `prompt_cache_key` 始终独立隔离，但上游是否也拿该头参与缓存分组无法从客户端源码确认 |
 | `DOWNSTREAM_HTTP_KEEPALIVE_INTERVAL` | 否 | `30s` | 下游 HTTP/SSE 保活周期，使用 Go duration；`0` 关闭。流式端点从首个心跳起建立 SSE 200，发送注释或 Messages ping；非流式端点发送 HTTP 102 |
 | `DOWNSTREAM_WS_KEEPALIVE_INTERVAL` | 否 | `45s` | 下游 WebSocket Ping 周期，使用 Go duration；`0` 关闭。覆盖 Responses、Realtime 与 Live Sideband |

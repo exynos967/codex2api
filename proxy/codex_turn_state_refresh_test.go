@@ -178,7 +178,8 @@ func waitRefineStopped(t *testing.T, h *Handler, id int64) {
 	t.Fatalf("死磕循环未在预期时间内退出")
 }
 
-// TestCodexTurnStateRefinePins292AndExits 死磕循环：312 继续磨，拿到 292 固定后退出。
+// TestCodexTurnStateRefinePins292AndExits 死磕循环：8 并发一轮齐发，先中 292 者胜、
+// 命中即停；同时实测最大在途数确实达到 8（并发不是摆样子的）。
 func TestCodexTurnStateRefinePins292AndExits(t *testing.T) {
 	oldDelay := codexTurnStateProbeDelay
 	codexTurnStateProbeDelay = 0
@@ -186,13 +187,23 @@ func TestCodexTurnStateRefinePins292AndExits(t *testing.T) {
 
 	degraded := strings.Repeat("b", auth.CodexTurnStateDegradedLength)
 	good := strings.Repeat("a", auth.CodexTurnStateGoodLength)
-	var calls int32
+	var calls, inflight, maxInflight int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cur := atomic.AddInt32(&inflight, 1)
+		for {
+			old := atomic.LoadInt32(&maxInflight)
+			if cur <= old || atomic.CompareAndSwapInt32(&maxInflight, old, cur) {
+				break
+			}
+		}
+		defer atomic.AddInt32(&inflight, -1)
 		if atomic.AddInt32(&calls, 1) <= 3 {
 			w.Header().Set(codexTurnStateHeader, degraded)
 		} else {
 			w.Header().Set(codexTurnStateHeader, good)
 		}
+		// 小睡让 8 个 worker 的在途窗口可靠重叠。
+		time.Sleep(20 * time.Millisecond)
 		_, _ = w.Write([]byte("data: {}\n\n"))
 	}))
 	defer srv.Close()
@@ -213,8 +224,13 @@ func TestCodexTurnStateRefinePins292AndExits(t *testing.T) {
 		t.Fatal("重复启动应幂等返回 true")
 	}
 	waitRefineStopped(t, h, account.ID())
-	if got := atomic.LoadInt32(&calls); got != 4 {
-		t.Errorf("探测次数 = %d, want 4（3 次 312 后第 4 次拿 292 退出）", got)
+	// 一轮 8 发齐出：前 3 发拿 312，第 4 发起 292 先中即停——
+	// 取消传播让部分在途请求可能未触达服务器，调用数落在 [4, 8]。
+	if got := atomic.LoadInt32(&calls); got < 4 || got > 8 {
+		t.Errorf("探测次数 = %d, want [4, 8]（一轮 8 并发，先中即停）", got)
+	}
+	if got := atomic.LoadInt32(&maxInflight); got < 4 {
+		t.Errorf("最大在途 = %d, want >= 4（并发必须真实发生）", got)
 	}
 }
 
