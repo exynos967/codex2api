@@ -12,6 +12,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/codex2api/proxy"
 
 	"github.com/gin-gonic/gin"
 )
@@ -161,5 +162,74 @@ func TestCodexTurnStateRefreshConfigSaveLifecycle(t *testing.T) {
 	_, models, _ := account.CodexTurnStateConfig()
 	if models != "gpt-5.5, gpt-5*" {
 		t.Fatalf("模型名单未同步: %q", models)
+	}
+}
+
+// TestCodexTurnStateRefineLifecycle 钉死"保存死磕开关 → 运行时同步 → 停止端点"闭环。
+func TestCodexTurnStateRefineLifecycle(t *testing.T) {
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, nil)
+	t.Cleanup(store.Stop)
+	h := &Handler{db: db, store: store, authCacheProxy: &proxy.Handler{}}
+
+	id, err := db.InsertAccountWithCredentials(context.Background(), "codex-b", map[string]interface{}{
+		"upstream_type": auth.UpstreamOpenAIResponses,
+		"access_token":  "test-access-token",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadAccountByID(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+
+	// 只改死磕开关也算变更。
+	update, err := parseAccountSchedulerUpdate(updateAccountSchedulerReq{
+		CodexTurnStateRefineEnabled: json.RawMessage(`"true"`),
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !update.hasChanges() {
+		t.Fatal("refine-only update must count as changes")
+	}
+	if got := update.CredentialUpdates[auth.CodexTurnStateRefineEnabledCredentialKey]; got != "true" {
+		t.Fatalf("refine credential = %#v", got)
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(id)}}
+	c.Request = httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/accounts/%d/scheduler", id),
+		strings.NewReader(`{"codex_turn_state_refine_enabled": "true"}`))
+	h.UpdateAccountScheduler(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("保存失败: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 落库 + 运行时同步。
+	row, err := db.GetAccountByID(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := row.GetCredential(auth.CodexTurnStateRefineEnabledCredentialKey); got != "true" {
+		t.Fatalf("refine 开关未落库: %q", got)
+	}
+	account := store.FindByID(id)
+	if account == nil || !account.IsCodexTurnStateRefineEnabled() {
+		t.Fatal("运行时死磕开关未同步")
+	}
+
+	// 停止端点：无循环在跑时 stopped=false、refining=false（不报错）。
+	rec2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(rec2)
+	c2.Params = gin.Params{{Key: "id", Value: fmt.Sprint(id)}}
+	c2.Request = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/admin/accounts/%d/codex-turn-state/refine/stop", id), nil)
+	h.StopCodexTurnStateRefine(c2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("停止端点失败: %d %s", rec2.Code, rec2.Body.String())
+	}
+	if !strings.Contains(rec2.Body.String(), `"stopped":false`) {
+		t.Fatalf("无循环时应 stopped=false: %s", rec2.Body.String())
 	}
 }

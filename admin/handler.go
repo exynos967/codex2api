@@ -1120,6 +1120,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PATCH("/accounts/:id/openai-responses", h.UpdateOpenAIResponsesAccount)
 	api.GET("/accounts/:id/openai-responses/balance", h.GetOpenAIResponsesBalance)
 	api.POST("/accounts/:id/codex-turn-state/refresh", h.RefreshCodexTurnState)
+	api.POST("/accounts/:id/codex-turn-state/refine/stop", h.StopCodexTurnStateRefine)
 	api.POST("/accounts/grok", h.AddGrokAccount)
 	api.POST("/accounts/grok/models", h.FetchGrokModels)
 	api.POST("/accounts/grok/batch-models", h.BatchUpdateGrokModels)
@@ -1693,6 +1694,9 @@ type accountResponse struct {
 	CodexTurnStateSetAt           string                      `json:"codex_turn_state_set_at,omitempty"`
 	CodexTurnStateRefreshEnabled  string                      `json:"codex_turn_state_refresh_enabled,omitempty"`
 	CodexTurnStateRefreshProxy    string                      `json:"codex_turn_state_refresh_proxy,omitempty"`
+	// 死磕刷新：开关落凭据；refining 是运行时状态（循环是否正在跑），不落库。
+	CodexTurnStateRefineEnabled string `json:"codex_turn_state_refine_enabled,omitempty"`
+	CodexTurnStateRefining      bool   `json:"codex_turn_state_refining,omitempty"`
 	CustomHeaders                 map[string]string           `json:"custom_headers,omitempty"`
 	HealthTier                    string                      `json:"health_tier"`
 	SchedulerScore                float64                     `json:"scheduler_score"`
@@ -2156,6 +2160,8 @@ type updateAccountSchedulerReq struct {
 	// turn-state 自动刷新开关与专用探测代理（见 proxy/codex_turn_state_refresh.go）。
 	CodexTurnStateRefreshEnabled json.RawMessage `json:"codex_turn_state_refresh_enabled"`
 	CodexTurnStateRefreshProxy   json.RawMessage `json:"codex_turn_state_refresh_proxy"`
+	// 死磕刷新开关（见 proxy/codex_turn_state_refresh.go 死磕循环）。
+	CodexTurnStateRefineEnabled json.RawMessage `json:"codex_turn_state_refine_enabled"`
 }
 
 type accountSchedulerUpdate struct {
@@ -2185,7 +2191,10 @@ type accountSchedulerUpdate struct {
 	// turn-state 自动刷新配置（值落凭据；运行时同步走 ApplyAccountCodexTurnStateRefresh）。
 	CodexTurnStateRefreshEnabled database.OptionalString
 	CodexTurnStateRefreshProxy   database.OptionalString
-	CredentialUpdates            map[string]interface{}
+	// 死磕刷新开关（值落凭据；运行时同步走 ApplyAccountCodexTurnStateRefine
+	// 并启停 proxy 侧死磕循环）。
+	CodexTurnStateRefineEnabled database.OptionalString
+	CredentialUpdates           map[string]interface{}
 }
 
 func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedulerUpdate, error) {
@@ -2310,6 +2319,10 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if err != nil {
 		return accountSchedulerUpdate{}, err
 	}
+	codexTurnStateRefineEnabledField, err := parseOptionalStringField(req.CodexTurnStateRefineEnabled, "codex_turn_state_refine_enabled", validateTruthyFlag)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
 	if codexFingerprintMode.Set {
 		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
 	}
@@ -2360,6 +2373,9 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	}
 	if codexTurnStateRefreshProxyField.Set {
 		credentialUpdates[auth.CodexTurnStateRefreshProxyCredentialKey] = codexTurnStateRefreshProxyField.Value
+	}
+	if codexTurnStateRefineEnabledField.Set {
+		credentialUpdates[auth.CodexTurnStateRefineEnabledCredentialKey] = codexTurnStateRefineEnabledField.Value
 	}
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
@@ -2424,6 +2440,7 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 		CodexTurnStateModels:         codexTurnStateModelsField,
 		CodexTurnStateRefreshEnabled: codexTurnStateRefreshEnabledField,
 		CodexTurnStateRefreshProxy:   codexTurnStateRefreshProxyField,
+		CodexTurnStateRefineEnabled:  codexTurnStateRefineEnabledField,
 		CredentialUpdates:            credentialUpdates,
 	}, nil
 }
@@ -2533,6 +2550,7 @@ func (u accountSchedulerUpdate) hasChanges() bool {
 		u.CodexTurnStateModels.Set ||
 		u.CodexTurnStateRefreshEnabled.Set ||
 		u.CodexTurnStateRefreshProxy.Set ||
+		u.CodexTurnStateRefineEnabled.Set ||
 		u.BaseConcurrencyOverride.Set ||
 		u.SkipWarmTier.Set ||
 		u.AllowedAPIKeyIDs.Set ||
@@ -2866,10 +2884,23 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 			h.store.ApplyAccountCodexTurnStateRefresh(id, enabled, proxyURL)
 		}
 	}
+	if update.CodexTurnStateRefineEnabled.Set {
+		enabled := update.CodexTurnStateRefineEnabled.Value == "true"
+		h.store.ApplyAccountCodexTurnStateRefine(id, enabled)
+		// 开关即指令：开→起死磕循环；关→停（与停止按钮等价）。
+		if h.authCacheProxy != nil {
+			if enabled {
+				if account := h.store.FindByID(id); account != nil {
+					h.authCacheProxy.StartCodexTurnStateRefine(account)
+				}
+			} else {
+				h.authCacheProxy.StopCodexTurnStateRefine(id)
+			}
+		}
+	}
 	if update.CustomHeaders.Set {
 		h.store.ApplyAccountCustomHeaders(id, update.CustomHeaders.Values)
-	} else if update.Timezone.Set {
-		// A Claude timezone edit rebuilds the restricted identity headers in
+	} else if update.Timezone.Set {		// A Claude timezone edit rebuilds the restricted identity headers in
 		// CredentialUpdates; publish the same snapshot immediately instead of
 		// waiting for the scheduler outbox/restart to refresh runtime state.
 		if headers, ok := update.CredentialUpdates["custom_headers"].(map[string]string); ok {
