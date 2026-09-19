@@ -1748,7 +1748,7 @@
     "codexTurnStateRefreshFailedDetail": "Failed to refresh Turn-State: {{error}}",
     "codexTurnStateRefineLabel": "Refine refresh (until a healthy token lands)",
     "codexTurnStateRefineHint": "Probes continuously without a limit until a non-degraded token lands; each probe is a real request and consumes a small amount of quota.",
-    "codexTurnStateRefiningProbes": "Running · {count} probes",
+    "codexTurnStateRefiningProbes": "Running · {{count}} probes",
     "codexTurnStateRefiningTitle": "Refine refresh in progress",
     "codexTurnStateRefineStopButton": "Stop Refresh",
     "codexTurnStateRefineStopping": "Stopping…",
