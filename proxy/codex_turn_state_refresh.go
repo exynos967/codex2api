@@ -91,6 +91,7 @@ type turnStateRefresher struct {
 	mu       sync.Mutex
 	cooldown map[int64]time.Time // accountID -> 下次可反应式刷新的时刻
 	running  map[int64]bool      // accountID -> 是否有刷新在途
+	refine   map[int64]context.CancelFunc // accountID -> 死磕循环的取消函数
 }
 
 func newTurnStateRefresher(h *Handler) *turnStateRefresher {
@@ -98,6 +99,7 @@ func newTurnStateRefresher(h *Handler) *turnStateRefresher {
 		h:        h,
 		cooldown: make(map[int64]time.Time),
 		running:  make(map[int64]bool),
+		refine:   make(map[int64]context.CancelFunc),
 	}
 }
 
@@ -115,6 +117,13 @@ func (h *Handler) StartCodexTurnStateRefresh(ctx context.Context) {
 				h.notifyDegradedTurnState(account)
 			}
 		})
+		// 启动扫描：死磕开关已开的账号立即起循环（不依赖巡检间隔——
+		// 巡检可能被 CODEX_TURN_STATE_REFRESH_INTERVAL=0 关闭，死磕独立）。
+		for _, account := range h.store.Accounts() {
+			if account.IsCodexTurnStateRefineEnabled() {
+				h.StartCodexTurnStateRefine(account)
+			}
+		}
 		interval := codexTurnStateRefreshInterval()
 		if interval <= 0 {
 			return
@@ -143,6 +152,9 @@ func (h *Handler) refreshAllEnabledAccounts(ctx context.Context) {
 		enabled, _ := account.CodexTurnStateRefreshConfig()
 		if !enabled {
 			continue
+		}
+		if h.CodexTurnStateRefining(account.ID()) {
+			continue // 死磕循环已在同一条探测通道上跑
 		}
 		if _, err := h.RefreshCodexTurnState(ctx, account); err != nil {
 			log.Printf("[turn-state-refresh] account=%d 刷新失败: %v", account.ID(), err)
@@ -307,6 +319,152 @@ func (h *Handler) refreshCodexTurnStateWith(ctx context.Context, account *auth.A
 	}
 	result := TurnStateRefreshResult{Length: lastLength, Error: fmt.Sprintf("%d 次探测均未拿到非降智 token：%v；请检查专用代理出口 IP 池", maxAttempts, lastErr)}
 	return result, fmt.Errorf("%s", result.Error)
+}
+
+// —— 死磕刷新（refine）：不限次数连续探测，拿到 292 不降智 token 才停 ——
+//
+// 与自动刷新的关系：自动刷新是"定时/触发式、单次触发有次数上限"的温和策略；
+// 死磕是运维明确授权的持续探测（每次探测都是真实请求、烧少量 token），用于
+// 轮换代理池 IP 命中率低、需要在后台一直磨的场景。死磕期间占用与刷新相同的
+// running 槽位——同一账号的探测通道只有一条，周期/反应式/手动刷新会报
+// "已有刷新在途"。
+
+// StartCodexTurnStateRefine 启动死磕循环。幂等：已在跑的账号返回 true 不重复起。
+func (h *Handler) StartCodexTurnStateRefine(account *auth.Account) bool {
+	if h == nil || h.store == nil || account == nil {
+		return false
+	}
+	r := h.turnStateRefresher()
+	id := account.ID()
+	r.mu.Lock()
+	if _, ok := r.refine[id]; ok {
+		r.mu.Unlock()
+		return true
+	}
+	// 与刷新互斥：有刷新在途时不抢占（刷新结束后调用方重开即可）。
+	if r.running[id] {
+		r.mu.Unlock()
+		return false
+	}
+	r.running[id] = true
+	loopCtx, cancel := context.WithCancel(context.Background())
+	r.refine[id] = cancel
+	r.mu.Unlock()
+	log.Printf("[turn-state-refresh] account=%d 死磕刷新启动", id)
+	go h.refineTurnStateLoop(loopCtx, id)
+	return true
+}
+
+// StopCodexTurnStateRefine 停止死磕循环；返回是否真有在跑的循环被停。
+func (h *Handler) StopCodexTurnStateRefine(accountID int64) bool {
+	if h == nil {
+		return false
+	}
+	r := h.turnStateRefresher()
+	r.mu.Lock()
+	cancel, ok := r.refine[accountID]
+	r.mu.Unlock()
+	if !ok {
+		return false
+	}
+	cancel()
+	log.Printf("[turn-state-refresh] account=%d 死磕刷新已手动停止", accountID)
+	return true
+}
+
+// CodexTurnStateRefining 报告账号是否在死磕中（管理端 UI 状态轮询用）。
+func (h *Handler) CodexTurnStateRefining(accountID int64) bool {
+	if h == nil {
+		return false
+	}
+	r := h.turnStateRefresher()
+	r.mu.Lock()
+	_, ok := r.refine[accountID]
+	r.mu.Unlock()
+	return ok
+}
+
+// refineTurnStateLoop 死磕循环体：拿到 292 固定后退出；账号被删/开关被关/
+// 被取消时退出；配置类守卫失败（无 token、无模型名单）也退出并留日志——
+// 那种情况循环一万次也不会好，等运维改完配置重开。
+func (h *Handler) refineTurnStateLoop(ctx context.Context, accountID int64) {
+	r := h.turnStateRefresher()
+	defer func() {
+		r.mu.Lock()
+		delete(r.refine, accountID)
+		delete(r.running, accountID)
+		r.mu.Unlock()
+	}()
+
+	attempt := 0
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(codexTurnStateProbeDelay):
+			}
+		}
+		attempt++
+
+		account := h.store.FindByID(accountID)
+		if account == nil {
+			log.Printf("[turn-state-refresh] account=%d 死磕退出：账号已删除", accountID)
+			return
+		}
+		if !account.IsCodexTurnStateRefineEnabled() {
+			log.Printf("[turn-state-refresh] account=%d 死磕退出：开关已关闭", accountID)
+			return
+		}
+		if account.IsCodexAgentIdentity() {
+			log.Printf("[turn-state-refresh] account=%d 死磕退出：Agent Identity 账号无 access_token", accountID)
+			return
+		}
+		account.Mu().RLock()
+		accessToken := account.AccessToken
+		accountProxy := account.ProxyURL
+		account.Mu().RUnlock()
+		if strings.TrimSpace(accessToken) == "" {
+			log.Printf("[turn-state-refresh] account=%d 死磕退出：账号无 access_token", accountID)
+			return
+		}
+		_, models, _ := account.CodexTurnStateConfig()
+		model := firstCodexTurnStateModel(models)
+		if model == "" {
+			log.Printf("[turn-state-refresh] account=%d 死磕退出：未配置模型名单，无法确定探测对象", accountID)
+			return
+		}
+		_, refreshProxy := account.CodexTurnStateRefreshConfig()
+		proxyURL := strings.TrimSpace(refreshProxy)
+		if proxyURL == "" {
+			proxyURL = accountProxy
+		}
+
+		state, status, err := h.probeCodexTurnState(ctx, account, accessToken, model, proxyURL)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("[turn-state-refresh] account=%d 死磕第 %d 次探测失败: %v", accountID, attempt, err)
+			continue
+		}
+		switch len(state) {
+		case auth.CodexTurnStateGoodLength:
+			if err := h.store.ApplyCodexTurnStateRefreshResult(context.Background(), accountID, state); err != nil {
+				log.Printf("[turn-state-refresh] account=%d 死磕拿到 292 但回写失败: %v", accountID, err)
+				return
+			}
+			log.Printf("[turn-state-refresh] account=%d model=%s 死磕第 %d 次探测固定 292 token，循环退出", accountID, model, attempt)
+			return
+		case auth.CodexTurnStateDegradedLength:
+			// 降智形态：继续磨，换下一个出口 IP。
+		default:
+			log.Printf("[turn-state-refresh] account=%d 死磕第 %d 次探测返回长度 %d（HTTP %d）", accountID, attempt, len(state), status)
+		}
+	}
 }
 
 // codexTurnStateProbeURL 探测端点；测试可替换为本地 httptest 服务。

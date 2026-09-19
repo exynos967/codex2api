@@ -26,6 +26,10 @@ const (
 	// 与铸造 IP 绑定，换 IP 是拿到 292 的前提。
 	CodexTurnStateRefreshEnabledCredentialKey = "codex_turn_state_refresh_enabled"
 	CodexTurnStateRefreshProxyCredentialKey   = "codex_turn_state_refresh_proxy"
+	// CodexTurnStateRefineEnabledCredentialKey 控制"死磕刷新"（见 proxy
+	// 死磕循环）：开启后不限次数连续探测，直到拿到 292 不降智 token 才停，
+	// 期间自动刷新的周期/反应式触发对该账号静默（同一探测通道已在跑）。
+	CodexTurnStateRefineEnabledCredentialKey = "codex_turn_state_refine_enabled"
 
 	// Codex turn-state token 形态（参考 turnstate 过滤器实测）：292 可复用不降智，
 	// 312 为 IP 绑定的降智形态。
@@ -179,6 +183,7 @@ func (a *Account) setCodexTurnStateFromRowLocked(row interface {
 	a.CodexTurnStateSetAt = ParseCodexTurnStateSetAt(row.GetCredential(CodexTurnStateSetAtCredentialKey))
 	a.CodexTurnStateRefreshEnabled = parseTruthyCredential(row.GetCredential(CodexTurnStateRefreshEnabledCredentialKey))
 	a.CodexTurnStateRefreshProxy = strings.TrimSpace(row.GetCredential(CodexTurnStateRefreshProxyCredentialKey))
+	a.CodexTurnStateRefineEnabled = parseTruthyCredential(row.GetCredential(CodexTurnStateRefineEnabledCredentialKey))
 }
 
 // parseTruthyCredential 解析凭据里的布尔开关（"1"/"true"/"yes"/"on" 为真）。
@@ -239,6 +244,25 @@ func (s *Store) ApplyCodexTurnStateRefreshResult(ctx context.Context, id int64, 
 	a.CodexTurnStateSetAt = setAt
 	a.mu.Unlock()
 	return nil
+}
+
+// IsCodexTurnStateRefineEnabled 返回死磕刷新开关快照。
+func (a *Account) IsCodexTurnStateRefineEnabled() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.CodexTurnStateRefineEnabled
+}
+
+// ApplyAccountCodexTurnStateRefine 把管理端保存的死磕刷新开关发布到运行时账号。
+func (s *Store) ApplyAccountCodexTurnStateRefine(id int64, enabled bool) {
+	if a := s.FindByID(id); a != nil {
+		a.mu.Lock()
+		a.CodexTurnStateRefineEnabled = enabled
+		a.mu.Unlock()
+	}
 }
 
 // ApplyAccountCodexTurnStateRefresh 把管理端保存的自动刷新配置发布到运行时账号。

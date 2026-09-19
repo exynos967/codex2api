@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
@@ -157,3 +158,118 @@ func TestFirstCodexTurnStateModel(t *testing.T) {
 		t.Errorf("单模型原样返回, got %q", got)
 	}
 }
+
+// waitRefineExit 轮询死磕循环退出（循环在拿到 292 / 被停 / 账号消失时自行退出）。
+func waitRefineExit(t *testing.T, h *Handler, id int64) {
+	t.Helper()
+	for i := 0; i < 500; i++ {
+		if !h.CodexTurnStateRefining(id) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("死磕循环未在预期时间内退出")
+}
+
+// TestCodexTurnStateRefinePins292AndExits 死磕循环：312 继续磨，拿到 292 固定后退出。
+func TestCodexTurnStateRefinePins292AndExits(t *testing.T) {
+	oldDelay := codexTurnStateProbeDelay
+	codexTurnStateProbeDelay = 0
+	defer func() { codexTurnStateProbeDelay = oldDelay }()
+
+	degraded := strings.Repeat("b", auth.CodexTurnStateDegradedLength)
+	good := strings.Repeat("a", auth.CodexTurnStateGoodLength)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) <= 3 {
+			w.Header().Set(codexTurnStateHeader, degraded)
+		} else {
+			w.Header().Set(codexTurnStateHeader, good)
+		}
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	defer srv.Close()
+	old := codexTurnStateProbeURL
+	codexTurnStateProbeURL = srv.URL
+	defer func() { codexTurnStateProbeURL = old }()
+
+	h, account := newTurnStateTestHandler(t)
+	account.CodexTurnStateRefineEnabled = true
+	if !h.StartCodexTurnStateRefine(account) {
+		t.Fatal("死磕循环应成功启动")
+	}
+	if !h.CodexTurnStateRefining(account.ID()) {
+		t.Fatal("启动后 refining 应为 true")
+	}
+	// 幂等：重复启动不报错、不重复起循环。
+	if !h.StartCodexTurnStateRefine(account) {
+		t.Fatal("重复启动应幂等返回 true")
+	}
+	waitRefineExit(t, h, account.ID())
+	if got := atomic.LoadInt32(&calls); got != 4 {
+		t.Errorf("探测次数 = %d, want 4（3 次 312 后第 4 次拿 292 退出）", got)
+	}
+}
+
+// TestCodexTurnStateRefineStopsOnDemand 停止按钮路径：循环磨 312 中被 Stop 后退出。
+func TestCodexTurnStateRefineStopsOnDemand(t *testing.T) {
+	oldDelay := codexTurnStateProbeDelay
+	codexTurnStateProbeDelay = 10 * time.Millisecond
+	defer func() { codexTurnStateProbeDelay = oldDelay }()
+
+	degraded := strings.Repeat("b", auth.CodexTurnStateDegradedLength)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set(codexTurnStateHeader, degraded)
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	defer srv.Close()
+	old := codexTurnStateProbeURL
+	codexTurnStateProbeURL = srv.URL
+	defer func() { codexTurnStateProbeURL = old }()
+
+	h, account := newTurnStateTestHandler(t)
+	account.CodexTurnStateRefineEnabled = true
+	if !h.StartCodexTurnStateRefine(account) {
+		t.Fatal("死磕循环应成功启动")
+	}
+	for i := 0; i < 200 && atomic.LoadInt32(&calls) == 0; i++ {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !h.StopCodexTurnStateRefine(account.ID()) {
+		t.Fatal("Stop 应返回 true（确有循环在跑）")
+	}
+	if h.StopCodexTurnStateRefine(account.ID()) {
+		t.Fatal("循环已停后 Stop 应返回 false")
+	}
+	waitRefineExit(t, h, account.ID())
+}
+
+// TestCodexTurnStateRefineSwitchOffExits 开关被关（PATCH 保存 false）后循环自行退出。
+func TestCodexTurnStateRefineSwitchOffExits(t *testing.T) {
+	oldDelay := codexTurnStateProbeDelay
+	codexTurnStateProbeDelay = 10 * time.Millisecond
+	defer func() { codexTurnStateProbeDelay = oldDelay }()
+
+	degraded := strings.Repeat("b", auth.CodexTurnStateDegradedLength)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(codexTurnStateHeader, degraded)
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	defer srv.Close()
+	old := codexTurnStateProbeURL
+	codexTurnStateProbeURL = srv.URL
+	defer func() { codexTurnStateProbeURL = old }()
+
+	h, account := newTurnStateTestHandler(t)
+	account.CodexTurnStateRefineEnabled = true
+	if !h.StartCodexTurnStateRefine(account) {
+		t.Fatal("死磕循环应成功启动")
+	}
+	account.Mu().Lock()
+	account.CodexTurnStateRefineEnabled = false
+	account.Mu().Unlock()
+	waitRefineExit(t, h, account.ID())
+}
+
