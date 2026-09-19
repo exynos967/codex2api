@@ -1910,6 +1910,9 @@ export default function Accounts() {
   const [editCodexTurnStateRefreshEnabled, setEditCodexTurnStateRefreshEnabled] = useState(false);
   const [editCodexTurnStateRefreshProxy, setEditCodexTurnStateRefreshProxy] = useState("");
   const [turnStateRefreshing, setTurnStateRefreshing] = useState(false);
+  // Turn State 死磕刷新:开关(保存即生效);"停止刷新"按钮的进行中态。
+  const [editCodexTurnStateRefineEnabled, setEditCodexTurnStateRefineEnabled] = useState(false);
+  const [turnStateRefineStopping, setTurnStateRefineStopping] = useState(false);
   // 时效倒计时的时钟源:编辑弹窗打开期间每秒推进一次,关闭即停。
   const [turnStateNow, setTurnStateNow] = useState(() => Date.now());
   // 代理池条目：账号表单里"从代理池选择"下拉的数据源。加载失败静默留空
@@ -2315,6 +2318,26 @@ export default function Accounts() {
       );
     } finally {
       setTurnStateRefreshing(false);
+    }
+  };
+
+  // 手动停止死磕刷新循环;开关本身保持不变(重启或再次保存会重新跑)。
+  const handleStopCodexTurnStateRefine = async () => {
+    if (!editingAccount || turnStateRefineStopping) return;
+    setTurnStateRefineStopping(true);
+    try {
+      await api.stopCodexTurnStateRefine(editingAccount.id);
+      showToast(t("accounts.codexTurnStateRefineStopped"), "success");
+      await reload();
+    } catch (error) {
+      showToast(
+        t("accounts.codexTurnStateRefineStopFailed", {
+          error: getErrorMessage(error),
+        }),
+        "error",
+      );
+    } finally {
+      setTurnStateRefineStopping(false);
     }
   };
 
@@ -5685,6 +5708,9 @@ export default function Accounts() {
     setEditCodexTurnStateRefreshProxy(
       account.codex_turn_state_refresh_proxy ?? "",
     );
+    setEditCodexTurnStateRefineEnabled(
+      (account.codex_turn_state_refine_enabled ?? "") === "true",
+    );
     setEditTags(account.tags ?? []);
     setEditGroupIds(account.group_ids ?? []);
     setEditOpenAIForm({
@@ -5915,6 +5941,8 @@ export default function Accounts() {
                 editCodexTurnStateRefreshEnabled ? "true" : "",
               codex_turn_state_refresh_proxy:
                 editCodexTurnStateRefreshProxy.trim(),
+              codex_turn_state_refine_enabled:
+                editCodexTurnStateRefineEnabled ? "true" : "false",
             }
           : {}),
       };
@@ -10067,6 +10095,26 @@ export default function Accounts() {
                                 aria-label={t("accounts.codexTurnStateRefreshLabel")}
                               />
                             </div>
+                            <div className="mt-3 flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-muted-foreground">
+                                  {t("accounts.codexTurnStateRefineLabel")}
+                                  {editingAccount?.codex_turn_state_refining ? (
+                                    <span className="ml-2 text-xs font-normal text-amber-500">
+                                      {t("accounts.codexTurnStateRefining")}
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                                  {t("accounts.codexTurnStateRefineHint")}
+                                </p>
+                              </div>
+                              <Switch
+                                checked={editCodexTurnStateRefineEnabled}
+                                onCheckedChange={setEditCodexTurnStateRefineEnabled}
+                                aria-label={t("accounts.codexTurnStateRefineLabel")}
+                              />
+                            </div>
                             <div className="mt-3">
                               <label className="block text-sm font-semibold text-muted-foreground mb-2">
                                 {t("accounts.codexTurnStateRefreshProxyLabel")}
@@ -10089,18 +10137,39 @@ export default function Accounts() {
                                 {t("accounts.codexTurnStateRefreshProxyHint")}
                               </p>
                             </div>
-                            <div className="mt-3">
+                            <div className="mt-3 flex items-center gap-2">
                               <Button
                                 type="button"
                                 variant="outline"
                                 size="sm"
-                                disabled={turnStateRefreshing}
+                                disabled={
+                                  turnStateRefreshing ||
+                                  Boolean(editingAccount?.codex_turn_state_refining)
+                                }
+                                title={
+                                  editingAccount?.codex_turn_state_refining
+                                    ? t("accounts.codexTurnStateRefiningTitle")
+                                    : undefined
+                                }
                                 onClick={handleRefreshCodexTurnState}
                               >
                                 {turnStateRefreshing
                                   ? t("accounts.codexTurnStateRefreshing")
                                   : t("accounts.codexTurnStateRefreshButton")}
                               </Button>
+                              {editingAccount?.codex_turn_state_refining ? (
+                                <Button
+                                  type="button"
+                                  variant="destructive"
+                                  size="sm"
+                                  disabled={turnStateRefineStopping}
+                                  onClick={handleStopCodexTurnStateRefine}
+                                >
+                                  {turnStateRefineStopping
+                                    ? t("accounts.codexTurnStateRefineStopping")
+                                    : t("accounts.codexTurnStateRefineStopButton")}
+                                </Button>
+                              ) : null}
                             </div>
                           </div>
                         ) : null}

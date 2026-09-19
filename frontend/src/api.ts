@@ -884,6 +884,9 @@ export const api = {
   // body 带表单当前值(未保存的改动也生效);空值回落已保存配置。
   refreshCodexTurnState: (id: number, opts?: { proxy?: string; models?: string }) =>
     request<{ length: number; pinned: boolean; state?: string; error?: string }>(`/accounts/${id}/codex-turn-state/refresh`, { method: 'POST', body: JSON.stringify(opts ?? {}), timeoutMs: 60_000 }),
+  // 手动停止死磕刷新循环;开关本身保持不变(重启或再次保存会重新跑)。
+  stopCodexTurnStateRefine: (id: number) =>
+    request<{ stopped: boolean; refining: boolean }>(`/accounts/${id}/codex-turn-state/refine/stop`, { method: 'POST' }),
   // 设置 OAuth 账号的支持模型白名单;空数组表示清空(该账号可调度所有模型)。返回归一化后的白名单。
   updateAccountModels: (id: number, models: string[]) =>
     request<{ models: string[] }>(`/accounts/${id}/models`, { method: 'PATCH', body: JSON.stringify({ models }) }),
