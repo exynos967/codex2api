@@ -271,6 +271,7 @@ func (h *Handler) buildAccountResponse(
 		CodexTurnStateRefreshProxy:   strings.TrimSpace(row.GetCredential(auth.CodexTurnStateRefreshProxyCredentialKey)),
 		CodexTurnStateRefineEnabled:  strings.TrimSpace(row.GetCredential(auth.CodexTurnStateRefineEnabledCredentialKey)),
 		CodexTurnStateRefining:       h.codexTurnStateRefining(row.ID),
+		CodexTurnStateRefineProbes:   h.codexTurnStateRefineProbes(row.ID),
 		CustomHeaders:                customHeaders,
 		UpstreamRequestIDHeader:      row.GetCredential(auth.UpstreamRequestIDHeaderCredentialKey),
 		ProxyURL:                     row.ProxyURL,

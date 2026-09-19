@@ -76,3 +76,12 @@ func (h *Handler) codexTurnStateRefining(accountID int64) bool {
 	}
 	return h.authCacheProxy.CodexTurnStateRefining(accountID)
 }
+
+// codexTurnStateRefineProbes 透传死磕循环的累计探测数（UI"已刷新 N 次"）。
+func (h *Handler) codexTurnStateRefineProbes(accountID int64) int64 {
+	if h.authCacheProxy == nil {
+		return 0
+	}
+	_, probes := h.authCacheProxy.CodexTurnStateRefineStats(accountID)
+	return probes
+}

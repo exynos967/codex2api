@@ -88,18 +88,20 @@ func observeDegradedTurnState(accountID int64, state string) {
 type turnStateRefresher struct {
 	h *Handler
 
-	mu       sync.Mutex
-	cooldown map[int64]time.Time // accountID -> 下次可反应式刷新的时刻
-	running  map[int64]bool      // accountID -> 是否有刷新在途
-	refine   map[int64]context.CancelFunc // accountID -> 死磕循环的取消函数
+	mu           sync.Mutex
+	cooldown     map[int64]time.Time          // accountID -> 下次可反应式刷新的时刻
+	running      map[int64]bool               // accountID -> 是否有刷新在途
+	refine       map[int64]context.CancelFunc // accountID -> 死磕循环的取消函数
+	refineProbes map[int64]int64              // accountID -> 死磕已发探测数（UI 计数）
 }
 
 func newTurnStateRefresher(h *Handler) *turnStateRefresher {
 	return &turnStateRefresher{
-		h:        h,
-		cooldown: make(map[int64]time.Time),
-		running:  make(map[int64]bool),
-		refine:   make(map[int64]context.CancelFunc),
+		h:            h,
+		cooldown:     make(map[int64]time.Time),
+		running:      make(map[int64]bool),
+		refine:       make(map[int64]context.CancelFunc),
+		refineProbes: make(map[int64]int64),
 	}
 }
 
@@ -347,6 +349,7 @@ func (h *Handler) StartCodexTurnStateRefine(account *auth.Account) bool {
 		return false
 	}
 	r.running[id] = true
+	r.refineProbes[id] = 0
 	loopCtx, cancel := context.WithCancel(context.Background())
 	r.refine[id] = cancel
 	r.mu.Unlock()
@@ -379,14 +382,21 @@ func (h *Handler) StopCodexTurnStateRefine(accountID int64) bool {
 
 // CodexTurnStateRefining 报告账号是否在死磕中（管理端 UI 状态轮询用）。
 func (h *Handler) CodexTurnStateRefining(accountID int64) bool {
+	refining, _ := h.CodexTurnStateRefineStats(accountID)
+	return refining
+}
+
+// CodexTurnStateRefineStats 返回死磕循环的运行状态与累计探测数（UI"已刷新 N 次"）。
+func (h *Handler) CodexTurnStateRefineStats(accountID int64) (refining bool, probes int64) {
 	if h == nil {
-		return false
+		return false, 0
 	}
 	r := h.turnStateRefresher()
 	r.mu.Lock()
-	_, ok := r.refine[accountID]
+	_, refining = r.refine[accountID]
+	probes = r.refineProbes[accountID]
 	r.mu.Unlock()
-	return ok
+	return refining, probes
 }
 
 // refineTurnStateLoop 死磕循环体：拿到 292 固定后退出；账号被删/开关被关/
@@ -424,6 +434,7 @@ func (h *Handler) refineTurnStateLoop(ctx context.Context, accountID int64) {
 		r.mu.Lock()
 		delete(r.refine, accountID)
 		delete(r.running, accountID)
+		delete(r.refineProbes, accountID)
 		r.mu.Unlock()
 	}()
 
@@ -517,6 +528,9 @@ func (h *Handler) refineTurnStateLoop(ctx context.Context, accountID int64) {
 		wg.Wait()
 		cancelRound()
 		totalProbes += parallel
+		r.mu.Lock()
+		r.refineProbes[accountID] = int64(totalProbes)
+		r.mu.Unlock()
 
 		if hit != "" {
 			if err := h.store.ApplyCodexTurnStateRefreshResult(context.Background(), accountID, hit); err != nil {

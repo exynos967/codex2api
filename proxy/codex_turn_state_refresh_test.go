@@ -234,6 +234,46 @@ func TestCodexTurnStateRefinePins292AndExits(t *testing.T) {
 	}
 }
 
+// TestCodexTurnStateRefineProbesCounter 死磕探测计数：一轮 8 并发未中即 +8，
+// 供 UI 显示"已刷新 N 次"。
+func TestCodexTurnStateRefineProbesCounter(t *testing.T) {
+	oldDelay := codexTurnStateProbeDelay
+	codexTurnStateProbeDelay = 20 * time.Millisecond
+	defer func() { codexTurnStateProbeDelay = oldDelay }()
+
+	degraded := strings.Repeat("b", auth.CodexTurnStateDegradedLength)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(codexTurnStateHeader, degraded)
+		_, _ = w.Write([]byte("data: {}\n\n"))
+	}))
+	defer srv.Close()
+	old := codexTurnStateProbeURL
+	codexTurnStateProbeURL = srv.URL
+	defer func() { codexTurnStateProbeURL = old }()
+
+	h, account := newTurnStateTestHandler(t)
+	account.CodexTurnStateRefineEnabled = true
+	if !h.StartCodexTurnStateRefine(account) {
+		t.Fatal("死磕循环应成功启动")
+	}
+	// 等至少两轮落地（一轮 +8），再核对计数。
+	for i := 0; i < 500; i++ {
+		if _, probes := h.CodexTurnStateRefineStats(account.ID()); probes >= 16 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	refining, probes := h.CodexTurnStateRefineStats(account.ID())
+	if !refining {
+		t.Fatal("计数阶段循环应在跑")
+	}
+	if probes < 16 || probes%8 != 0 {
+		t.Errorf("探测计数 = %d, want >= 16 且为 8 的倍数", probes)
+	}
+	h.StopCodexTurnStateRefine(account.ID())
+	waitRefineStopped(t, h, account.ID())
+}
+
 // TestCodexTurnStateRefineStopsOnDemand 停止按钮路径：循环磨 312 中被 Stop 后退出。
 func TestCodexTurnStateRefineStopsOnDemand(t *testing.T) {
 	oldDelay := codexTurnStateProbeDelay

@@ -1697,6 +1697,7 @@ type accountResponse struct {
 	// 死磕刷新：开关落凭据；refining 是运行时状态（循环是否正在跑），不落库。
 	CodexTurnStateRefineEnabled string `json:"codex_turn_state_refine_enabled,omitempty"`
 	CodexTurnStateRefining      bool   `json:"codex_turn_state_refining,omitempty"`
+	CodexTurnStateRefineProbes  int64  `json:"codex_turn_state_refine_probes,omitempty"`
 	CustomHeaders                 map[string]string           `json:"custom_headers,omitempty"`
 	HealthTier                    string                      `json:"health_tier"`
 	SchedulerScore                float64                     `json:"scheduler_score"`
