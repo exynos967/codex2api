@@ -137,6 +137,12 @@ func ApplyCodexSessionHeaders(outbound http.Header, account *auth.Account, fallb
 
 	outbound.Set(codexSessionIDHeader, sessionID)
 	outbound.Set(codexThreadIDHeader, threadID)
+	// x-codex-window-id 实测为 "{window_uuid}:{window_number}"，单窗口形态下
+	// window_uuid 与 session_id 同值、序号为 0（0.155 抓包：WS 握手与 SSE POST
+	// 均如此）。多窗口只在 TUI 多窗格出现，网关无法观测下游窗口数，取恒 0。
+	if strings.TrimSpace(outbound.Get(codexWindowIDHeader)) == "" {
+		outbound.Set(codexWindowIDHeader, sessionID+":0")
+	}
 	// x-client-request-id 实测恒等于 thread_id，且真实客户端无条件发送。下游若已
 	// 携带（白名单透传 + 收敛改写）就保留其取值，避免覆盖掉已经对齐的收敛结果。
 	if strings.TrimSpace(outbound.Get(codexClientRequestIDHeader)) == "" {

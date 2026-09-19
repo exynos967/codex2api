@@ -1222,7 +1222,13 @@ func (m *Manager) createConnection(
 	// 拨号代理与 ExecuteRequestViaWebsocket 同一套判定:Resin 承担出站时不配代理
 	// (传入的 wsURL 已是 Resin 反代地址);poolKey 仍按第 2 层代理分池,保持既有键不变。
 	proxyURL := effectiveProxyURL(account, proxyOverride)
-	if dialProxy := proxy.CodexDialProxyURL(account, proxyURL); dialProxy != "" {
+	dialProxy := proxy.CodexDialProxyURL(account, proxyURL)
+	if proxy.CodexWSTLSDialSupported(wsURL) {
+		// 官方上游：用 uTLS rustls 无 ALPN 指纹终结 TLS（真实 codex WS 腿形态，
+		// gorilla 默认的 Go crypto/tls 指纹一眼假）。代理在拨号函数内部处理，
+		// 不能与 gorilla 的 Proxy 字段共存（会把 CONNECT 套到 TLS 外侧）。
+		dialer.NetDialTLSContext = proxy.NewCodexWSTLSDialer(dialProxy)
+	} else if dialProxy != "" {
 		if err := configureWebsocketDialerProxy(dialer, dialProxy); err != nil {
 			return nil, err
 		}
