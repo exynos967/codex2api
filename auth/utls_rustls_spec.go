@@ -25,11 +25,11 @@ import (
 //   - cipher list 末尾带 0x00FF（TLS_EMPTY_RENEGOTIATION_INFO_SCSV）
 //
 // 与抓包真身（aws_lc_rs provider）的唯一刻意偏差：supported_groups 不含
-// X25519MLKEM768(0x11EC)。aws_lc_rs 会声明该曲线但 key_share 只发 X25519，
-// 支持 MLKEM 的对端（Cloudflare）因此回 HelloRetryRequest 索取 MLKEM share，
-// 而 uTLS 无法应答该 HRR，握手必断。去掉 4588 后形态等价于 rustls+ring
-// provider（ring 本就不支持 MLKEM）——这是真实存在且常见的 rustls 客户端家族，
-// 且对 CF 恒免 HRR（一次握手完成）。
+// X25519MLKEM768(0x11EC)。0.155 真身的 supported_groups 与 key_share 都已带上
+// MLKEM（两组 share 齐发，CF 直接选取、无需 HRR）；uTLS 无法生成 MLKEM share，
+// 若声明该曲线，支持 MLKEM 的对端会回 HelloRetryRequest 索取，握手必断。去掉
+// 4588 后形态等价于 rustls+ring provider（ring 本就不支持 MLKEM）——这是真实
+// 存在且常见的 rustls 客户端家族，且对 CF 恒免 HRR（一次握手完成）。
 //
 // ⚠️ rustls 版本升级可能改变这些参数（如新增曲线/扩展）。bump 时重新抓包核对。
 
@@ -37,9 +37,20 @@ import (
 // 每次调用构造新实例并随机打乱扩展顺序（对齐 rustls 的 per-handshake order_seed
 // 随机化）：uTLS 握手过程也会就地改写扩展内容（如 key_share 密钥），不可复用实例。
 func CodexRustlsClientHelloSpec() *utls.ClientHelloSpec {
+	return codexRustlsClientHelloSpec(true)
+}
+
+// CodexRustlsWSClientHelloSpec 是 WebSocket 腿的变体：真实 codex 0.155 的 WS
+// 客户端是 http1-only（WS 升级本就是 HTTP/1.1 机制），ClientHello 不带 ALPN
+// 扩展（抓包 tlsprobe/codex.flows，JA4 t13d100900_...）。其余字段与 POST 腿一致。
+func CodexRustlsWSClientHelloSpec() *utls.ClientHelloSpec {
+	return codexRustlsClientHelloSpec(false)
+}
+
+func codexRustlsClientHelloSpec(includeALPN bool) *utls.ClientHelloSpec {
 	extensions := []utls.TLSExtension{
-		&utls.SNIExtension{},                             // 0
-		&utls.StatusRequestExtension{},                   // 5
+		&utls.SNIExtension{},           // 0
+		&utls.StatusRequestExtension{}, // 5
 		&utls.SupportedCurvesExtension{Curves: []utls.CurveID{ // 10
 			utls.X25519,    // 29
 			utls.CurveP256, // 23
@@ -49,6 +60,8 @@ func CodexRustlsClientHelloSpec() *utls.ClientHelloSpec {
 		}},
 		&utls.SupportedPointsExtension{SupportedPoints: []byte{0x00}}, // 11
 		&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{ // 13
+			// 与真实 codex 0.155（aws-lc-rs provider）抓包逐值一致，共 10 个；
+			// rsa_pss_pss_*（0904/0905/0906）不在 aws-lc-rs 的默认列表里，多发即破绽。
 			0x0503, // ecdsa_secp384r1_sha384
 			0x0403, // ecdsa_secp256r1_sha256
 			0x0603, // ecdsa_secp521r1_sha512
@@ -59,22 +72,29 @@ func CodexRustlsClientHelloSpec() *utls.ClientHelloSpec {
 			0x0601, // rsa_pkcs1_sha512
 			0x0501, // rsa_pkcs1_sha384
 			0x0401, // rsa_pkcs1_sha256
-			0x0904, // rsa_pss_pss_sha256
-			0x0905, // rsa_pss_pss_sha384
-			0x0906, // rsa_pss_pss_sha512
 		}},
 		&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}}, // 16
 		&utls.ExtendedMasterSecretExtension{},                          // 23
 		&utls.SessionTicketExtension{},                                 // 35
-		&utls.SupportedVersionsExtension{Versions: []uint16{            // 43
+		&utls.SupportedVersionsExtension{Versions: []uint16{ // 43
 			0x0304, // TLS 1.3
 			0x0303, // TLS 1.2
 		}},
 		&utls.PSKKeyExchangeModesExtension{Modes: []uint8{1}}, // 45 psk_dhe_ke
-		&utls.KeyShareExtension{KeyShares: []utls.KeyShare{   // 51
+		&utls.KeyShareExtension{KeyShares: []utls.KeyShare{ // 51
 			// Data 留空由 uTLS 握手时生成真实密钥（>1 字节会被当作预设密钥原样发送）。
 			{Group: utls.X25519},
 		}},
+	}
+	if !includeALPN {
+		// WS 腿：摘除 ALPN 扩展（真实客户端的 http1-only WS 客户端不发）。
+		filtered := extensions[:0]
+		for _, ext := range extensions {
+			if _, isALPN := ext.(*utls.ALPNExtension); !isALPN {
+				filtered = append(filtered, ext)
+			}
+		}
+		extensions = filtered
 	}
 	shuffleTLSExtensions(extensions)
 	// pre_shared_key 固定末尾且不参与洗牌：TLS 1.3 要求它在最后（rustls 同样
