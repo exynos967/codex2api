@@ -1748,7 +1748,7 @@
     "codexTurnStateRefreshFailedDetail": "刷新 Turn-State 失败:{{error}}",
     "codexTurnStateRefineLabel": "死磕刷新(直到拿到不降智 token)",
     "codexTurnStateRefineHint": "不限次连续探测直到拿到不降智 token;每次探测都是真实请求,会消耗少量额度。",
-    "codexTurnStateRefining": "进行中",
+    "codexTurnStateRefiningProbes": "进行中 · 已刷新 {count} 次",
     "codexTurnStateRefiningTitle": "死磕刷新进行中",
     "codexTurnStateRefineStopButton": "停止刷新",
     "codexTurnStateRefineStopping": "停止中…",

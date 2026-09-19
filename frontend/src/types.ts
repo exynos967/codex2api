@@ -349,6 +349,8 @@ export interface AccountRow {
   codex_turn_state_refine_enabled?: string
   /** Whether the refine loop is currently running (runtime state, not persisted). */
   codex_turn_state_refining?: boolean
+  /** Total probes fired by the running refine loop (runtime, reset on start/stop). */
+  codex_turn_state_refine_probes?: number
   health_tier?: string
   scheduler_score?: number
   dispatch_score?: number

@@ -2286,6 +2286,7 @@ export default function Accounts() {
     return () => window.clearInterval(timer);
   }, [turnStateTtlVisible]);
 
+
   // 手动刷新 Turn-State:调专用端点经探测代理向上游索取 292(正常)形态 token
   // 并回写;pinned=false/409 时展示后端返回的降智等原因。带表单当前值——
   // 未保存的代理/模型名单改动也直接生效,不要先保存才能刷。
@@ -2883,6 +2884,24 @@ export default function Accounts() {
     // →静默重载循环)必须整体停摆,否则在 Grok 页后台空转并连带整树重渲染。
     enabled: providerView === "codex",
   });
+  // 死磕刷新的"进行中/已刷新 N 次"要跟着服务端走：editingAccount 只是打开
+  // 弹窗时的快照，列表数据才是活的；死磕期间每 5s 静默拉一次让计数滚动。
+  const editingAccountLive = useMemo(
+    () =>
+      data?.accounts?.find((a) => a.id === editingAccount?.id) ??
+      editingAccount,
+    [data, editingAccount],
+  );
+  const turnStateRefining = Boolean(
+    editingAccountLive?.codex_turn_state_refining,
+  );
+  useEffect(() => {
+    if (!turnStateRefining) return;
+    const timer = window.setInterval(() => {
+      void reloadSilently();
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [turnStateRefining, reloadSilently]);
   const disabledSorts = useMemo(
     () => resolveDisabledAccountSorts(data.disabledSorts, data.summary?.total),
     [data.disabledSorts, data.summary?.total],
@@ -10099,9 +10118,13 @@ export default function Accounts() {
                               <div className="min-w-0">
                                 <div className="text-sm font-semibold text-muted-foreground">
                                   {t("accounts.codexTurnStateRefineLabel")}
-                                  {editingAccount?.codex_turn_state_refining ? (
+                                  {turnStateRefining ? (
                                     <span className="ml-2 text-xs font-normal text-amber-500">
-                                      {t("accounts.codexTurnStateRefining")}
+                                      {t("accounts.codexTurnStateRefiningProbes", {
+                                        count:
+                                          editingAccountLive?.codex_turn_state_refine_probes ??
+                                          0,
+                                      })}
                                     </span>
                                   ) : null}
                                 </div>
@@ -10144,10 +10167,10 @@ export default function Accounts() {
                                 size="sm"
                                 disabled={
                                   turnStateRefreshing ||
-                                  Boolean(editingAccount?.codex_turn_state_refining)
+                                  Boolean(turnStateRefining)
                                 }
                                 title={
-                                  editingAccount?.codex_turn_state_refining
+                                  turnStateRefining
                                     ? t("accounts.codexTurnStateRefiningTitle")
                                     : undefined
                                 }
@@ -10157,7 +10180,7 @@ export default function Accounts() {
                                   ? t("accounts.codexTurnStateRefreshing")
                                   : t("accounts.codexTurnStateRefreshButton")}
                               </Button>
-                              {editingAccount?.codex_turn_state_refining ? (
+                              {turnStateRefining ? (
                                 <Button
                                   type="button"
                                   variant="destructive"
