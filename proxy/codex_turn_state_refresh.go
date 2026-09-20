@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -297,6 +296,9 @@ func (h *Handler) refreshCodexTurnStateWith(ctx context.Context, account *auth.A
 		}
 		state, status, err := h.probeCodexTurnState(ctx, account, accessToken, model, proxyURL)
 		if err != nil {
+			if codexTurnStateProbeRequiresCorrection(status) {
+				return failRefreshResult(err)
+			}
 			lastErr = err
 			continue
 		}
@@ -399,12 +401,8 @@ func (h *Handler) CodexTurnStateRefineStats(accountID int64) (refining bool, pro
 	return refining, probes
 }
 
-// refineTurnStateLoop 死磕循环体：拿到 292 固定后退出；账号被删/开关被关/
-// 被取消时退出；配置类守卫失败（无 token、无模型名单）也退出并留日志——
-// 那种情况循环一万次也不会好，等运维改完配置重开。
 // codexTurnStateRefineParallel 死磕单轮并发探测数。轮换代理池每次连接换出口
-// IP，N 并发等于一轮同时试 N 个 IP，撞上健康出口的耗时约缩到 1/N——这正是
-// 死磕模式的意义所在（额度总消耗与串行相当：都是打到命中为止）。
+// IP，但是否实际轮换取决于代理配置；取消前已经发出的请求仍可能消耗额度。
 // CODEX_TURN_STATE_REFINE_PARALLEL 可调（1-8，默认 8；1 = 退回串行形态）。
 func codexTurnStateRefineParallel() int {
 	raw := strings.TrimSpace(os.Getenv("CODEX_TURN_STATE_REFINE_PARALLEL"))
@@ -501,11 +499,19 @@ func (h *Handler) refineTurnStateLoop(ctx context.Context, accountID int64) {
 			}()
 		}
 		var hit string
-		var lastErr error
-		degraded, empty, other := 0, 0, 0
+		var lastErr, correctionErr error
+		httpStatuses := make(map[int]int)
+		degraded, empty, other, failed := 0, 0, 0, 0
 		for i := 0; i < parallel; i++ {
 			out := <-results
+			if out.status != 0 {
+				httpStatuses[out.status]++
+			}
 			if out.err != nil {
+				failed++
+				if codexTurnStateProbeRequiresCorrection(out.status) && correctionErr == nil {
+					correctionErr = out.err
+				}
 				if lastErr == nil && roundCtx.Err() == nil {
 					lastErr = out.err
 				}
@@ -532,22 +538,23 @@ func (h *Handler) refineTurnStateLoop(ctx context.Context, accountID int64) {
 		r.refineProbes[accountID] = int64(totalProbes)
 		r.mu.Unlock()
 
+		if ctx.Err() != nil {
+			return
+		}
 		if hit != "" {
-			if err := h.store.ApplyCodexTurnStateRefreshResult(context.Background(), accountID, hit); err != nil {
+			if err := h.store.ApplyCodexTurnStateRefreshResult(ctx, accountID, hit); err != nil {
 				log.Printf("[turn-state-refresh] account=%d 死磕拿到 292 但回写失败: %v", accountID, err)
 				return
 			}
 			log.Printf("[turn-state-refresh] account=%d model=%s 死磕第 %d 轮（累计 %d 发）固定 292 token，循环退出", accountID, model, round, totalProbes)
 			return
 		}
-		if ctx.Err() != nil {
+		if correctionErr != nil {
+			log.Printf("[turn-state-refresh] account=%d 刷新停止：请求或凭据需要修正，HTTP=%v 错误=%v", accountID, httpStatuses, correctionErr)
 			return
 		}
-		if lastErr != nil {
-			log.Printf("[turn-state-refresh] account=%d 死磕第 %d 轮（%d 并发）探测失败: %v", accountID, round, parallel, lastErr)
-		} else {
-			log.Printf("[turn-state-refresh] account=%d 死磕第 %d 轮（%d 并发）未中：312=%d 空=%d 其他=%d", accountID, round, parallel, degraded, empty, other)
-		}
+		// 次数是尝试数；HTTP失败、TLS失败和2xx缺头分别记录。
+		log.Printf("[turn-state-refresh] account=%d 死磕第 %d 轮（%d 并发）HTTP=%v 312=%d 空=%d 其他=%d 失败=%d 错误=%v", accountID, round, parallel, httpStatuses, degraded, empty, other, failed, lastErr)
 	}
 }
 
@@ -558,11 +565,16 @@ var codexTurnStateProbeURL = CodexBaseURL + "/responses"
 // 传输与头部走与真实推理完全相同的链路（rustls 指纹 + Codex 头），探测本身
 // 就是一次真实客户端形态的回话。
 func (h *Handler) probeCodexTurnState(ctx context.Context, account *auth.Account, accessToken, model, proxyURL string) (state string, status int, err error) {
+	// 此处直连官方，使用消息数组；不是中转网关可接收的 input 字符串。
 	body, _ := json.Marshal(map[string]any{
-		"model":  model,
-		"stream": true,
-		"store":  false,
-		"input":  "ts",
+		"model":        model,
+		"stream":       true,
+		"store":        false,
+		"instructions": "",
+		"input": []any{map[string]any{
+			"type": "message", "role": "user",
+			"content": []any{map[string]any{"type": "input_text", "text": "ts"}},
+		}},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codexTurnStateProbeURL, bytes.NewReader(body))
 	if err != nil {
@@ -573,7 +585,9 @@ func (h *Handler) probeCodexTurnState(ctx context.Context, account *auth.Account
 		deviceCfg = &DeviceProfileConfig{}
 	}
 	applyCodexRequestHeaders(req, account, accessToken, "", "", deviceCfg, nil)
-
+	// 索取新state不能被自定义旧state钉住；最小探测请求使用非Lite协议。
+	req.Header.Del(codexTurnStateHeader)
+	req.Header.Del(codexResponsesLiteHeader)
 	client := &http.Client{Transport: newCodexTransport(proxyURL), Timeout: 30 * time.Second}
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
@@ -581,9 +595,17 @@ func (h *Handler) probeCodexTurnState(ctx context.Context, account *auth.Account
 		return "", 0, err
 	}
 	defer resp.Body.Close()
-	// 只关心响应头；SSE 体读一点即弃。
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+	// 只取头并关闭流，不等SSE正文；不输出可能含敏感回显的响应体。
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", resp.StatusCode, fmt.Errorf("turn-state 探测被拒绝：HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
 	return strings.TrimSpace(resp.Header.Get(codexTurnStateHeader)), resp.StatusCode, nil
+}
+
+// 403可能是出口拦截，408/429可重试；其它4xx需修正请求或凭据。
+// TLS及5xx仍保留可取消重试，不能当作有效的token获取。
+func codexTurnStateProbeRequiresCorrection(status int) bool {
+	return status >= 400 && status < 500 && status != http.StatusForbidden && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
 }
 
 // firstCodexTurnStateModel 取注入模型名单的第一个（名单是"逗号+空格"分隔的规整形态）。
