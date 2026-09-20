@@ -82,7 +82,7 @@ Codex2API 采用三层配置架构：
 | `CODEX_STATSIG_API_KEY` | 否 | 内置公开 key | 覆盖 Codex Desktop/CLI 共用的公开 Statsig SDK key，仅遥测开启时使用 |
 | `CODEX_SESSION_HEADER_MODE` | 否 | `native` | 出站会话头形态。`native` 发真实客户端的 `session-id` / `thread-id` / `x-client-request-id`；`legacy` 回退到旧的 `Session_id`（WS 另带 `Conversation_id`） |
 | `CODEX_UA_HOST_ONLY` | 否 | `true` | 号池画像是否约束到宿主机 OS 家族（linux/darwin/windows）。被动 TCP 指纹能识别出口机器家族，跨家族画像（Linux 服务器冒出 "Mac OS" 账号）与应用层自相矛盾；全部账号经住宅/第三方代理出口时可设为 `0` 关闭 |
-| `CODEX_TURN_STATE_REFRESH_INTERVAL` | 否 | `45m` | turn-state 自动刷新巡检周期（Go duration）；`0` 关闭周期巡检（账号级开关开启时，观测到降智 312 token 的反应式刷新与手动刷新仍有效）。开启刷新的账号经其专用探测代理（`codex_turn_state_refresh_proxy`，用于更换出口 IP）向上游探测，只固定 292 字节的非降智 token 并回写注入值；312 为 IP 绑定的降智形态，拿到说明代理出口需要更换 |
+| `CODEX_TURN_STATE_REFRESH_INTERVAL` | 否 | `45m` | turn-state 自动刷新巡检周期（Go duration）；已有292会保留，实际响应出现312时走反应式刷新，不以保存时间判定失效；`0` 关闭周期巡检（账号级开关开启时，观测到降智 312 token 的反应式刷新与手动刷新仍有效）。开启刷新的账号经其专用探测代理（`codex_turn_state_refresh_proxy`，用于更换出口 IP）向上游探测，只固定 292 字节的非降智 token 并回写注入值；312 为 IP 绑定的降智形态，拿到说明代理出口需要更换 |
 | `CODEX_TURN_STATE_REFRESH_ATTEMPTS` | 否 | `8` | 单次刷新触发内的最大探测次数（上限 30）。轮换代理池（每次连接换出口 IP，含纯 IPv6 池，URL 用 `[v6]:port` 方括号写法）下连探几次即应撞上正常出口；拿到 292 立即停止。探测是真实请求会烧少量 token，故必须封顶 |
 | `CODEX_TURN_STATE_REFINE_PARALLEL` | 否 | `8` | 死磕刷新（`codex_turn_state_refine_enabled`）单轮并发探测数（1-8）。每轮最多 N 个请求，实际是否更换出口 IP 取决于代理池配置。命中 292 即取消其余在途探测；`1` 退回串行。已发送的并发请求仍可能消耗额度。计数是尝试数，HTTP/TLS 失败不代表取得 token；日志分别记录 HTTP 状态、失败与 token 长度分类。请求/凭据类 4xx 会停止当前循环（403/408/429 保留重试） |
 | `CODEX_SESSION_HEADER_ALIGN_CONVERGED` | 否 | `false` | 开启后 `session-id` 头改用指纹收敛后的会话身份，与 turn metadata 的 `session_id` 对齐。默认关：请求体 `prompt_cache_key` 始终独立隔离，但上游是否也拿该头参与缓存分组无法从客户端源码确认 |

@@ -188,6 +188,8 @@ type Account struct {
 	// CodexTurnStateRefineEnabled 死磕刷新开关：开启后不限次连续探测，
 	// 直到拿到 292 不降智 token（见 proxy/codex_turn_state_refresh.go 死磕循环）。
 	CodexTurnStateRefineEnabled bool
+	// CodexTurnStateRequire292 严格 292 门禁开关，默认关闭。
+	CodexTurnStateRequire292 bool
 	// ClaudeFingerprintMode 见 claude_fingerprint_mode.go:Claude Code 出站身份头
 	// 收敛模式(preserve/force;空=跟随全局默认)。
 	ClaudeFingerprintMode string
@@ -5510,9 +5512,6 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		CodexPassthroughMode:         codexPassthroughMode,
 		CodexFingerprintMode:         codexFingerprintMode,
 		Timezone:                     accountTimezone,
-		CodexTurnState:               strings.TrimSpace(row.GetCredential(CodexTurnStateCredentialKey)),
-		CodexTurnStateModels:         NormalizeCodexTurnStateModels(row.GetCredential(CodexTurnStateModelsCredentialKey)),
-		CodexTurnStateSetAt:          ParseCodexTurnStateSetAt(row.GetCredential(CodexTurnStateSetAtCredentialKey)),
 		ClaudeFingerprintMode:        claudeFingerprintMode,
 		ClaudeAuthKind:               claudeAuthKind,
 		ClaudeBaseURL:                row.GetCredential(ClaudeBaseURLCredentialKey),
@@ -5521,6 +5520,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		ClaudeClientVersionOverride:  claudeClientVersionOverride,
 		claudeSessionWindow:          claudeSessionWindowForRow(upstreamType, s.ClaudeSessionWindowLimit()),
 	}
+	account.setCodexTurnStateFromRowLocked(row)
 	if strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamClaude) {
 		if observedRaw := strings.TrimSpace(row.GetCredential(ClaudeUsageProbeAtCredentialKey)); observedRaw != "" {
 			if observedAt, parseErr := time.Parse(time.RFC3339, observedRaw); parseErr == nil {

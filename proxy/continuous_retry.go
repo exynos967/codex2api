@@ -151,6 +151,10 @@ func continuousRetryRequestErrorSelected(policy database.ContinuousRetryPolicy, 
 	if !policy.Enabled || err == nil {
 		return false
 	}
+	// 门禁终态/用户停止不是可换号重试的上游故障；catch-all也不能把它复活。
+	if isCodex292GateError(err) || errors.Is(err, context.Canceled) {
+		return false
+	}
 	if errors.Is(err, errContinuousRetryDeadlineExceeded) || isContinuousRetryLocalFailure(err) {
 		return false
 	}

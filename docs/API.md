@@ -753,8 +753,16 @@ Codex 的流式 remote compact v2（`POST /v1/responses`，`stream:true`，`inpu
 | base_concurrency_override | integer/null   | 否   | 基础并发覆盖值，`≥1` 无上限，`null` 表示恢复全局默认                                                      |
 | skip_warm_tier            | boolean/null   | 否   | 是否跳过 warm 层级；`null` 等同 `false`，字段省略时保持原值                                                |
 | allowed_api_key_ids       | integer[]/null | 否   | 允许调用该账号的 API Key ID 列表，去重升序保存；字段省略时保持原值，传 `null` 或 `[]` 表示恢复为全部可调用 |
-| codex_turn_state          | string/null    | 否   | 凭据级强制注入的 `X-Codex-Turn-State`：非空时该账号每个出站 Codex 请求（HTTP 头与 WebSocket 帧体 `client_metadata` 都覆盖）都强制携带该值，优先于客户端回带值与自定义请求头；只接受单行 ASCII 可见字符，最长 4096 字节；`null` 或空串表示关闭。换成新值时会重置 `codex_turn_state_set_at`（时效起点，实测约 1 小时失效），原样重提同一个值不重置，存量值没有起点时补一次 |
+| codex_turn_state          | string/null    | 否   | 凭据级强制注入的 `X-Codex-Turn-State`：非空时该账号每个出站 Codex 请求（HTTP 头与 WebSocket 帧体 `client_metadata` 都覆盖）都强制携带该值，优先于客户端回带值与自定义请求头；只接受单行 ASCII 可见字符，最长 4096 字节；`null` 或空串表示关闭。换成新值时会重置 `codex_turn_state_set_at`（仅记录保存时间，不据此判定过期），原样重提同一个值不重置，存量值没有起点时补一次 |
 | codex_turn_state_models   | string/null    | 否   | 把上述注入限定在指定模型：逗号分隔，大小写不敏感，结尾 `*` 做前缀匹配，客户端模型与上游模型任一命中即注入；空表示不限模型；识别不出模型名的请求照常注入 |
+| codex_turn_state_require_292 | string/null | 否 | 默认关闭。传 `"true"` 为本账号的 Codex Responses（含聊天、Messages、生图转换）及 Compact 推理启用响应门禁：312 不交付，按实际请求模型刷新并持久化后重发原请求，重新验证响应为292才交付。严格模式覆盖注入模型范围；上游未给可验证状态或长度未知时报错，不作成功响应放行。`"false"` / `null` 关闭，省略不改动 |
+
+强制292对 HTTP 使用本次响应头，对 WebSocket 使用本次完整响应帧，不能以连接握手的旧值作证明。严格 WS 最多暂存32 MiB，验证完整成功终态后回放；超限或读取失败报错。非2xx错误仍按原错误路径处理。未开启时保持原来的流式行为；等待期间允许心跳保活，不发送被拦截的业务内容。
+
+同账号同模型的等待请求共享一次8并发刷新，不同模型在账号内排队；取消一个等待者不影响其余等待者，全部取消则终止刷新。停止刷新按钮取消当前任务及已排队等待者，不修改开关；后续新请求仍可根据已保存的开关发起新任务。刷新失败不会交付此前被拦截的响应，也不会被外层无限重试策略重新启动。WS续链重试使用原API Key作用域内的完整历史快照展开输入；无法恢复历史时报错，不直接删掉previous_response_id后无历史重发。重放上游推理及已发出的并发探测可能增加用量。
+
+Turn-State界面不再显示估算的1小时倒计时，也不按保存时间清空292值。编辑弹窗每5秒串行读取单账号详情，后台成功刷新后自动回填未被手动编辑的注入框；保存其他设置时不把未改动的旧token写回后台。此长度判定是配置策略，不是模型质量或上游有效期的证明。
+
 
 **响应:**
 

@@ -111,10 +111,7 @@ import {
   applyOptionalWorkspaceRouteHeader,
   applyWorkspaceRouteHeader,
 } from "../lib/workspaceRoute";
-import {
-  computeCodexTurnStateTtl,
-  formatCodexTurnStateCountdown,
-} from "../lib/codexTurnState";
+import { useCodexTurnStateEditor } from "../hooks/useCodexTurnStateEditor";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1904,8 +1901,19 @@ export default function Accounts() {
   const [editTimezone, setEditTimezone] = useState("");
   const [editTimezoneCustom, setEditTimezoneCustom] = useState(false);
   // Turn State 强制注入:注入值 + 限定模型(逗号分隔)。仅 Codex 官方账号下发。
-  const [editCodexTurnState, setEditCodexTurnState] = useState("");
+  const {
+    liveAccount: editingAccountLive,
+    draft: turnStateDraft,
+    setValue: setEditCodexTurnState,
+    refresh: refreshTurnStateAccount,
+  } = useCodexTurnStateEditor(
+    editingAccount,
+    editingAccount !== null && isCodexOfficialAccount(editingAccount),
+  );
+  const editCodexTurnState = turnStateDraft.value;
+  const turnStateRefining = Boolean(editingAccountLive?.codex_turn_state_refining);
   const [editCodexTurnStateModels, setEditCodexTurnStateModels] = useState("");
+  const [editCodexTurnStateRequire292, setEditCodexTurnStateRequire292] = useState(false);
   // Turn State 自动刷新:开关 + 专用探测代理;手动刷新按钮的进行中态。
   const [editCodexTurnStateRefreshEnabled, setEditCodexTurnStateRefreshEnabled] = useState(false);
   const [editCodexTurnStateRefreshProxy, setEditCodexTurnStateRefreshProxy] = useState("");
@@ -1913,8 +1921,6 @@ export default function Accounts() {
   // Turn State 死磕刷新:开关(保存即生效);"停止刷新"按钮的进行中态。
   const [editCodexTurnStateRefineEnabled, setEditCodexTurnStateRefineEnabled] = useState(false);
   const [turnStateRefineStopping, setTurnStateRefineStopping] = useState(false);
-  // 时效倒计时的时钟源:编辑弹窗打开期间每秒推进一次,关闭即停。
-  const [turnStateNow, setTurnStateNow] = useState(() => Date.now());
   // 代理池条目：账号表单里"从代理池选择"下拉的数据源。加载失败静默留空
   // （选择器为空时自动隐藏，不影响手动填代理）。
   const [proxyPool, setProxyPool] = useState<ProxyRow[]>([]);
@@ -2272,23 +2278,8 @@ export default function Accounts() {
     </div>
   );
 
-  // Turn State 时效:只在编辑弹窗打开且该账号已保存注入值时每秒重算;弹窗关闭清掉 interval。
-  const savedCodexTurnState = editingAccount?.codex_turn_state ?? "";
-  const turnStateTtlVisible =
-    editingAccount !== null &&
-    isCodexOfficialAccount(editingAccount) &&
-    savedCodexTurnState !== "" &&
-    editCodexTurnState === savedCodexTurnState;
-  useEffect(() => {
-    if (!turnStateTtlVisible) return;
-    setTurnStateNow(Date.now());
-    const timer = window.setInterval(() => setTurnStateNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [turnStateTtlVisible]);
-
-
-  // 手动刷新 Turn-State:调专用端点经探测代理向上游索取 292(正常)形态 token
-  // 并回写;pinned=false/409 时展示后端返回的降智等原因。带表单当前值——
+  // 手动刷新 Turn-State:调专用端点经探测代理向上游索取 292 形态 token
+  // 并回写;pinned=false/409 时展示后端返回的失败原因。带表单当前值——
   // 未保存的代理/模型名单改动也直接生效,不要先保存才能刷。
   const handleRefreshCodexTurnState = async () => {
     if (!editingAccount || turnStateRefreshing) return;
@@ -2300,10 +2291,8 @@ export default function Accounts() {
       });
       if (result.pinned) {
         showToast(t("accounts.codexTurnStateRefreshPinned"), "success");
-        if (result.state) {
-          setEditCodexTurnState(result.state);
-        }
-        await reload();
+        refreshTurnStateAccount(editingAccount.id);
+        void reloadSilently();
       } else {
         showToast(
           result.error || t("accounts.codexTurnStateRefreshFailed"),
@@ -2329,7 +2318,8 @@ export default function Accounts() {
     try {
       await api.stopCodexTurnStateRefine(editingAccount.id);
       showToast(t("accounts.codexTurnStateRefineStopped"), "success");
-      await reload();
+      refreshTurnStateAccount(editingAccount.id);
+      void reloadSilently();
     } catch (error) {
       showToast(
         t("accounts.codexTurnStateRefineStopFailed", {
@@ -2340,59 +2330,6 @@ export default function Accounts() {
     } finally {
       setTurnStateRefineStopping(false);
     }
-  };
-
-  const renderCodexTurnStateTtl = () => {
-    if (!turnStateTtlVisible) return null;
-    const ttl = computeCodexTurnStateTtl(
-      editingAccount?.codex_turn_state_set_at,
-      turnStateNow,
-    );
-    if (ttl.kind === "unknown") {
-      return (
-        <p className="mt-1.5 text-xs text-muted-foreground">
-          {t("accounts.codexTurnStateTtlUnknown")}
-        </p>
-      );
-    }
-    if (ttl.kind === "expired") {
-      return (
-        <div className="mt-1.5 space-y-0.5">
-          <p className="flex items-center gap-1.5 text-xs font-medium text-red-600 dark:text-red-400">
-            <Timer className="size-3.5" />
-            {t("accounts.codexTurnStateTtlExpired")}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            {t("accounts.codexTurnStateTtlExpiredHint")}
-          </p>
-        </div>
-      );
-    }
-    const barColor = ttl.warning ? "bg-amber-500" : "bg-emerald-500";
-    const textColor = ttl.warning
-      ? "text-amber-600 dark:text-amber-400"
-      : "text-emerald-600 dark:text-emerald-400";
-    return (
-      <div className="mt-1.5 space-y-1">
-        <p
-          className={cn(
-            "flex items-center gap-1.5 text-xs font-medium tabular-nums",
-            textColor,
-          )}
-        >
-          <Timer className="size-3.5" />
-          {t("accounts.codexTurnStateTtlRemaining", {
-            time: formatCodexTurnStateCountdown(ttl.remainingMs),
-          })}
-        </p>
-        <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
-          <div
-            className={cn("h-full rounded-full transition-[width]", barColor)}
-            style={{ width: `${Math.round(ttl.ratio * 100)}%` }}
-          />
-        </div>
-      </div>
-    );
   };
 
   const renderWorkspaceRouteInput = ({
@@ -2884,24 +2821,6 @@ export default function Accounts() {
     // →静默重载循环)必须整体停摆,否则在 Grok 页后台空转并连带整树重渲染。
     enabled: providerView === "codex",
   });
-  // 死磕刷新的"进行中/已刷新 N 次"要跟着服务端走：editingAccount 只是打开
-  // 弹窗时的快照，列表数据才是活的；死磕期间每 5s 静默拉一次让计数滚动。
-  const editingAccountLive = useMemo(
-    () =>
-      data?.accounts?.find((a) => a.id === editingAccount?.id) ??
-      editingAccount,
-    [data, editingAccount],
-  );
-  const turnStateRefining = Boolean(
-    editingAccountLive?.codex_turn_state_refining,
-  );
-  useEffect(() => {
-    if (!turnStateRefining) return;
-    const timer = window.setInterval(() => {
-      void reloadSilently();
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [turnStateRefining, reloadSilently]);
   const disabledSorts = useMemo(
     () => resolveDisabledAccountSorts(data.disabledSorts, data.summary?.total),
     [data.disabledSorts, data.summary?.total],
@@ -5719,8 +5638,8 @@ export default function Accounts() {
     setEditTimezoneCustom(
       Boolean(account.timezone && !findClaudeTimezoneOption(account.timezone)),
     );
-    setEditCodexTurnState(account.codex_turn_state ?? "");
     setEditCodexTurnStateModels(account.codex_turn_state_models ?? "");
+    setEditCodexTurnStateRequire292(account.codex_turn_state_require_292 === "true");
     setEditCodexTurnStateRefreshEnabled(
       (account.codex_turn_state_refresh_enabled ?? "") === "true",
     );
@@ -5789,8 +5708,8 @@ export default function Accounts() {
     setEditCodexFingerprintMode("off");
     setEditTimezone("");
     setEditTimezoneCustom(false);
-    setEditCodexTurnState("");
     setEditCodexTurnStateModels("");
+    setEditCodexTurnStateRequire292(false);
     setEditCodexTurnStateRefreshEnabled(false);
     setEditCodexTurnStateRefreshProxy("");
     setEditTags([]);
@@ -5954,8 +5873,13 @@ export default function Accounts() {
           ? {
               codex_fingerprint_mode: editCodexFingerprintMode,
               timezone: editTimezone.trim(),
-              codex_turn_state: editCodexTurnState.trim(),
+              // 后台同步不算手动编辑,避免保存其他字段覆盖后台新 token。
+              codex_turn_state: turnStateDraft.dirty
+                ? editCodexTurnState.trim()
+                : undefined,
               codex_turn_state_models: editCodexTurnStateModels.trim(),
+              codex_turn_state_require_292:
+                editCodexTurnStateRequire292 ? "true" : "false",
               codex_turn_state_refresh_enabled:
                 editCodexTurnStateRefreshEnabled ? "true" : "",
               codex_turn_state_refresh_proxy:
@@ -10052,7 +9976,7 @@ export default function Accounts() {
                             </p>
                             <div className="mt-3">
                               <div className="flex items-center justify-between mb-2">
-                                <label className="block text-sm font-semibold text-muted-foreground">
+                                <label htmlFor="edit-codex-turn-state" className="block text-sm font-semibold text-muted-foreground">
                                   {t("accounts.codexTurnStateValueLabel")}
                                 </label>
                                 <Button
@@ -10066,6 +9990,8 @@ export default function Accounts() {
                                 </Button>
                               </div>
                               <textarea
+                                id="edit-codex-turn-state"
+                                aria-describedby="edit-codex-turn-state-policy"
                                 className="w-full min-h-[80px] p-3 border border-input rounded-xl bg-background text-sm resize-y font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                                 placeholder={t(
                                   "accounts.codexTurnStateValuePlaceholder",
@@ -10077,7 +10003,9 @@ export default function Accounts() {
                                 rows={3}
                                 spellCheck={false}
                               />
-                              {renderCodexTurnStateTtl()}
+                              <p id="edit-codex-turn-state-policy" className="mt-1.5 text-xs text-muted-foreground">
+                                {t("accounts.codexTurnStatePersistenceHint")}
+                              </p>
                             </div>
                             <div className="mt-3">
                               <label className="block text-sm font-semibold text-muted-foreground mb-2">
@@ -10098,6 +10026,22 @@ export default function Accounts() {
                               <p className="mt-1.5 text-xs text-muted-foreground">
                                 {t("accounts.codexTurnStateModelsHint")}
                               </p>
+                            </div>
+                            <div className="mt-3 flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-muted-foreground">
+                                  {t("accounts.codexTurnStateRequire292Label")}
+                                </div>
+                                <p id="edit-codex-turn-state-require-292-hint" className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                                  {t("accounts.codexTurnStateRequire292Hint")}
+                                </p>
+                              </div>
+                              <Switch
+                                checked={editCodexTurnStateRequire292}
+                                onCheckedChange={setEditCodexTurnStateRequire292}
+                                aria-label={t("accounts.codexTurnStateRequire292Label")}
+                                aria-describedby="edit-codex-turn-state-require-292-hint"
+                              />
                             </div>
                             <div className="mt-3 flex items-start justify-between gap-3">
                               <div className="min-w-0">

@@ -91,12 +91,18 @@ type turnStateRefresher struct {
 	cooldown     map[int64]time.Time          // accountID -> 下次可反应式刷新的时刻
 	running      map[int64]bool               // accountID -> 是否有刷新在途
 	refine       map[int64]context.CancelFunc // accountID -> 死磕循环的取消函数
-	refineProbes map[int64]int64              // accountID -> 死磕已发探测数（UI 计数）
+	done         map[int64]chan struct{}
+	strict       map[int64]*strictTurnStateTask
+	lifecycle    context.Context
+	refineProbes map[int64]int64 // accountID -> 死磕已发探测数（UI 计数）
 }
 
 func newTurnStateRefresher(h *Handler) *turnStateRefresher {
 	return &turnStateRefresher{
 		h:            h,
+		done:         make(map[int64]chan struct{}),
+		strict:       make(map[int64]*strictTurnStateTask),
+		lifecycle:    context.Background(),
 		cooldown:     make(map[int64]time.Time),
 		running:      make(map[int64]bool),
 		refine:       make(map[int64]context.CancelFunc),
@@ -111,6 +117,11 @@ func (h *Handler) StartCodexTurnStateRefresh(ctx context.Context) {
 		return
 	}
 	h.turnStateRefreshStartOnce.Do(func() {
+		r := h.turnStateRefresher()
+		r.mu.Lock()
+		r.lifecycle = ctx
+		r.mu.Unlock()
+		strictTurnStateRefreshHandler.Store(h)
 		// 降智观测回调：HTTP 响应头 / WS 帧里出现 312 形态时反应式刷新。
 		// 与周期巡检独立安装——巡检关了，反应式触发仍然有效。
 		degradedTurnStateObserver.Store(func(accountID int64) {
@@ -121,6 +132,10 @@ func (h *Handler) StartCodexTurnStateRefresh(ctx context.Context) {
 		// 启动扫描：死磕开关已开的账号立即起循环（不依赖巡检间隔——
 		// 巡检可能被 CODEX_TURN_STATE_REFRESH_INTERVAL=0 关闭，死磕独立）。
 		for _, account := range h.store.Accounts() {
+			pinned, _, _ := account.CodexTurnStateConfig()
+			if len(pinned) == auth.CodexTurnStateGoodLength {
+				continue
+			}
 			if account.IsCodexTurnStateRefineEnabled() {
 				h.StartCodexTurnStateRefine(account)
 			}
@@ -154,6 +169,11 @@ func (h *Handler) refreshAllEnabledAccounts(ctx context.Context) {
 		if !enabled {
 			continue
 		}
+		// 已有292不按保存时间换掉；实际响应出现312由观测路径触发刷新。
+		pinned, _, _ := account.CodexTurnStateConfig()
+		if len(pinned) == auth.CodexTurnStateGoodLength {
+			continue
+		}
 		if h.CodexTurnStateRefining(account.ID()) {
 			continue // 死磕循环已在同一条探测通道上跑
 		}
@@ -171,6 +191,10 @@ func (h *Handler) notifyDegradedTurnState(account *auth.Account) {
 	}
 	enabled, _ := account.CodexTurnStateRefreshConfig()
 	if !enabled {
+		return
+	}
+	if account.IsCodexTurnStateRefineEnabled() {
+		h.StartCodexTurnStateRefine(account)
 		return
 	}
 	r := h.turnStateRefresher()
@@ -240,15 +264,18 @@ func (h *Handler) refreshCodexTurnStateWith(ctx context.Context, account *auth.A
 	}
 	r := h.turnStateRefresher()
 	r.mu.Lock()
-	if r.running[account.ID()] {
+	if r.running[account.ID()] || r.strict[account.ID()] != nil {
 		r.mu.Unlock()
 		return failRefreshResult(fmt.Errorf("该账号已有刷新在途"))
 	}
 	r.running[account.ID()] = true
+	r.done[account.ID()] = make(chan struct{})
 	r.mu.Unlock()
 	defer func() {
 		r.mu.Lock()
 		delete(r.running, account.ID())
+		close(r.done[account.ID()])
+		delete(r.done, account.ID())
 		r.mu.Unlock()
 	}()
 
@@ -311,6 +338,7 @@ func (h *Handler) refreshCodexTurnStateWith(ctx context.Context, account *auth.A
 				return result, err
 			}
 			result.Pinned = true
+			result.State = state
 			log.Printf("[turn-state-refresh] account=%d model=%s 第 %d/%d 次探测固定 292 token", account.ID(), model, attempt, maxAttempts)
 			return result, nil
 		case auth.CodexTurnStateDegradedLength:
@@ -346,13 +374,14 @@ func (h *Handler) StartCodexTurnStateRefine(account *auth.Account) bool {
 		return true
 	}
 	// 与刷新互斥：有刷新在途时不抢占（刷新结束后调用方重开即可）。
-	if r.running[id] {
+	if r.running[id] || r.strict[id] != nil {
 		r.mu.Unlock()
 		return false
 	}
 	r.running[id] = true
+	r.done[id] = make(chan struct{})
 	r.refineProbes[id] = 0
-	loopCtx, cancel := context.WithCancel(context.Background())
+	loopCtx, cancel := context.WithCancel(r.lifecycle)
 	r.refine[id] = cancel
 	r.mu.Unlock()
 	log.Printf("[turn-state-refresh] account=%d 死磕刷新启动", id)
@@ -368,16 +397,22 @@ func (h *Handler) StopCodexTurnStateRefine(accountID int64) bool {
 	r := h.turnStateRefresher()
 	r.mu.Lock()
 	cancel, ok := r.refine[accountID]
+	strict := r.strict[accountID]
 	if ok {
-		// 同步删条目再 cancel：不这么做，循环 goroutine 的 defer 清理之前
-		// 重复 Stop 会再次命中旧条目、谎报"又停了一次"（CI 实测竞态）。
 		delete(r.refine, accountID)
+		cancel()
+	}
+	if strict != nil && !strict.stopped {
+		strict.stopped = true
+		strict.cancel()
+		// 旧等待者仍持任务指针并返回取消，新请求可排队等待槽位真正释放。
+		delete(r.strict, accountID)
+		ok = true
 	}
 	r.mu.Unlock()
 	if !ok {
 		return false
 	}
-	cancel()
 	log.Printf("[turn-state-refresh] account=%d 死磕刷新已手动停止", accountID)
 	return true
 }
@@ -396,6 +431,9 @@ func (h *Handler) CodexTurnStateRefineStats(accountID int64) (refining bool, pro
 	r := h.turnStateRefresher()
 	r.mu.Lock()
 	_, refining = r.refine[accountID]
+	if task := r.strict[accountID]; task != nil && !task.stopped {
+		refining = true
+	}
 	probes = r.refineProbes[accountID]
 	r.mu.Unlock()
 	return refining, probes
@@ -433,62 +471,76 @@ func (h *Handler) refineTurnStateLoop(ctx context.Context, accountID int64) {
 		delete(r.refine, accountID)
 		delete(r.running, accountID)
 		delete(r.refineProbes, accountID)
+		close(r.done[accountID])
+		delete(r.done, accountID)
 		r.mu.Unlock()
 	}()
+	_, err := h.probeCodexTurnStateUntilGood(ctx, accountID, "", "", false)
+	if err != nil {
+		log.Printf("[turn-state-refresh] account=%d 死磕退出: %v", accountID, err)
+	}
+}
 
-	parallel := codexTurnStateRefineParallel()
-	round := 0
-	totalProbes := 0
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		if round > 0 {
+// probeCodexTurnStateUntilGood 供后台死磕与严格请求共享；成功必须先完成持久化。
+func (h *Handler) probeCodexTurnStateUntilGood(ctx context.Context, accountID int64, requestModel, proxyOverride string, strict bool) (string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// 开关和账号变更没有通知通道；轮询授权以取消正在等待响应头的请求，不设任务 TTL。
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(codexTurnStateProbeDelay):
+			case <-ticker.C:
+				if _, err := h.turnStateProbeAccount(accountID, strict); err != nil {
+					cancel()
+					return
+				}
 			}
 		}
-		round++
-
-		account := h.store.FindByID(accountID)
-		if account == nil {
-			log.Printf("[turn-state-refresh] account=%d 死磕退出：账号已删除", accountID)
-			return
+	}()
+	defer func() { cancel(); <-watchDone }()
+	parallel := codexTurnStateRefineParallel()
+	r := h.turnStateRefresher()
+	for round := 1; ; round++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
-		if !account.IsCodexTurnStateRefineEnabled() {
-			log.Printf("[turn-state-refresh] account=%d 死磕退出：开关已关闭", accountID)
-			return
+		account, err := h.turnStateProbeAccount(accountID, strict)
+		if err != nil {
+			return "", err
 		}
-		if account.IsCodexAgentIdentity() {
-			log.Printf("[turn-state-refresh] account=%d 死磕退出：Agent Identity 账号无 access_token", accountID)
-			return
+		model := requestModel
+		if !strict {
+			_, models, _ := account.CodexTurnStateConfig()
+			model = firstCodexTurnStateModel(models)
+		}
+		if model == "" {
+			return "", fmt.Errorf("未配置探测模型")
 		}
 		account.Mu().RLock()
-		accessToken := account.AccessToken
-		accountProxy := account.ProxyURL
+		accessToken, accountProxy := account.AccessToken, account.ProxyURL
 		account.Mu().RUnlock()
 		if strings.TrimSpace(accessToken) == "" {
-			log.Printf("[turn-state-refresh] account=%d 死磕退出：账号无 access_token", accountID)
-			return
-		}
-		_, models, _ := account.CodexTurnStateConfig()
-		model := firstCodexTurnStateModel(models)
-		if model == "" {
-			log.Printf("[turn-state-refresh] account=%d 死磕退出：未配置模型名单，无法确定探测对象", accountID)
-			return
+			return "", fmt.Errorf("账号无 access_token")
 		}
 		_, refreshProxy := account.CodexTurnStateRefreshConfig()
 		proxyURL := strings.TrimSpace(refreshProxy)
 		if proxyURL == "" {
+			proxyURL = strings.TrimSpace(proxyOverride)
+		}
+		if proxyURL == "" {
 			proxyURL = accountProxy
 		}
-
-		// 一轮并发探测：N 个 worker 各发一发，先中 292 者胜——命中即 cancel
-		// 让在途的败者尽快收手（探测走同一 ctx，取消会中止在途请求）。
 		roundCtx, cancelRound := context.WithCancel(ctx)
 		results := make(chan refineProbeOutcome, parallel)
+		r.mu.Lock()
+		r.refineProbes[accountID] += int64(parallel)
+		r.mu.Unlock()
 		var wg sync.WaitGroup
 		for i := 0; i < parallel; i++ {
 			wg.Add(1)
@@ -499,63 +551,84 @@ func (h *Handler) refineTurnStateLoop(ctx context.Context, accountID int64) {
 			}()
 		}
 		var hit string
-		var lastErr, correctionErr error
-		httpStatuses := make(map[int]int)
+		var correctionErr, lastErr error
+		statuses := make(map[int]int)
 		degraded, empty, other, failed := 0, 0, 0, 0
 		for i := 0; i < parallel; i++ {
 			out := <-results
 			if out.status != 0 {
-				httpStatuses[out.status]++
+				statuses[out.status]++
 			}
 			if out.err != nil {
 				failed++
-				if codexTurnStateProbeRequiresCorrection(out.status) && correctionErr == nil {
-					correctionErr = out.err
-				}
 				if lastErr == nil && roundCtx.Err() == nil {
 					lastErr = out.err
 				}
-				continue
-			}
-			switch len(out.state) {
-			case auth.CodexTurnStateGoodLength:
-				if hit == "" {
-					hit = out.state
-					cancelRound()
+			} else {
+				switch len(out.state) {
+				case auth.CodexTurnStateDegradedLength:
+					degraded++
+				case 0:
+					empty++
+				case auth.CodexTurnStateGoodLength:
+				default:
+					other++
 				}
-			case auth.CodexTurnStateDegradedLength:
-				degraded++
-			case 0:
-				empty++
-			default:
-				other++
+			}
+			if out.err != nil && codexTurnStateProbeRequiresCorrection(out.status) {
+				correctionErr = out.err
+				cancelRound()
+			}
+			if out.err == nil && len(out.state) == auth.CodexTurnStateGoodLength && hit == "" {
+				hit = out.state
+				cancelRound()
 			}
 		}
 		wg.Wait()
 		cancelRound()
-		totalProbes += parallel
-		r.mu.Lock()
-		r.refineProbes[accountID] = int64(totalProbes)
-		r.mu.Unlock()
-
-		if ctx.Err() != nil {
-			return
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if _, err := h.turnStateProbeAccount(accountID, strict); err != nil {
+			return "", err
+		}
+		if correctionErr != nil {
+			return "", correctionErr
 		}
 		if hit != "" {
 			if err := h.store.ApplyCodexTurnStateRefreshResult(ctx, accountID, hit); err != nil {
-				log.Printf("[turn-state-refresh] account=%d 死磕拿到 292 但回写失败: %v", accountID, err)
-				return
+				return "", err
 			}
-			log.Printf("[turn-state-refresh] account=%d model=%s 死磕第 %d 轮（累计 %d 发）固定 292 token，循环退出", accountID, model, round, totalProbes)
-			return
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			log.Printf("[turn-state-refresh] account=%d model=%s 第 %d 轮固定 292 token", accountID, model, round)
+			return hit, nil
 		}
-		if correctionErr != nil {
-			log.Printf("[turn-state-refresh] account=%d 刷新停止：请求或凭据需要修正，HTTP=%v 错误=%v", accountID, httpStatuses, correctionErr)
-			return
+		log.Printf("[turn-state-refresh] account=%d 第 %d 轮（%d 并发）HTTP=%v 312=%d 空=%d 其他=%d 失败=%d 错误=%v", accountID, round, parallel, statuses, degraded, empty, other, failed, lastErr)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(codexTurnStateProbeDelay):
 		}
-		// 次数是尝试数；HTTP失败、TLS失败和2xx缺头分别记录。
-		log.Printf("[turn-state-refresh] account=%d 死磕第 %d 轮（%d 并发）HTTP=%v 312=%d 空=%d 其他=%d 失败=%d 错误=%v", accountID, round, parallel, httpStatuses, degraded, empty, other, failed, lastErr)
 	}
+}
+
+func (h *Handler) turnStateProbeAccount(accountID int64, strict bool) (*auth.Account, error) {
+	account := h.store.FindByID(accountID)
+	if account == nil {
+		return nil, fmt.Errorf("账号已删除")
+	}
+	if strict && !account.IsCodexTurnStateRequire292() {
+		return nil, fmt.Errorf("严格 292 开关已关闭")
+	}
+	if !strict && !account.IsCodexTurnStateRefineEnabled() {
+		return nil, fmt.Errorf("死磕开关已关闭")
+	}
+	if account.IsCodexAgentIdentity() {
+		return nil, fmt.Errorf("Agent Identity 账号无 access_token")
+	}
+	return account, nil
 }
 
 // codexTurnStateProbeURL 探测端点；测试可替换为本地 httptest 服务。

@@ -1,73 +1,68 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import {
-  CODEX_TURN_STATE_TTL_MS,
-  computeCodexTurnStateTtl,
-  formatCodexTurnStateCountdown,
-  parseCodexTurnStateSetAt,
+  syncCodexTurnStateDraft,
+  editCodexTurnStateDraft,
 } from "./codexTurnState.ts";
 
-const SET_AT = "2026-09-17T10:00:00Z";
-const SET_AT_MS = Date.parse(SET_AT);
-
-test("parseCodexTurnStateSetAt handles empty and invalid input", () => {
-  assert.equal(parseCodexTurnStateSetAt(undefined), null);
-  assert.equal(parseCodexTurnStateSetAt(null), null);
-  assert.equal(parseCodexTurnStateSetAt(""), null);
-  assert.equal(parseCodexTurnStateSetAt("   "), null);
-  assert.equal(parseCodexTurnStateSetAt("not-a-date"), null);
-  assert.equal(parseCodexTurnStateSetAt(SET_AT), SET_AT_MS);
-  assert.equal(parseCodexTurnStateSetAt(" 2026-09-17T10:00:00+08:00 "), Date.parse("2026-09-17T02:00:00Z"));
+const snapshot = (value = "pinned-292", setAt = "2020-01-01T00:00:00Z") => ({
+  codex_turn_state: value,
+  codex_turn_state_set_at: setAt,
 });
 
-test("computeCodexTurnStateTtl reports unknown when set_at is missing", () => {
-  assert.deepEqual(computeCodexTurnStateTtl(undefined, SET_AT_MS), { kind: "unknown" });
-  assert.deepEqual(computeCodexTurnStateTtl("garbage", SET_AT_MS), { kind: "unknown" });
+test("poll results fill untouched input after refinement stops", () => {
+  const initial = syncCodexTurnStateDraft(null, {});
+  const latest = { ...snapshot(), codex_turn_state_refining: false };
+  const filled = syncCodexTurnStateDraft(initial, latest);
+  assert.equal(filled.value, "pinned-292");
+  assert.equal(filled.dirty, false);
+  const replaced = syncCodexTurnStateDraft(filled, snapshot("next-292", "2026-09-20T10:00:00Z"));
+  assert.equal(replaced.value, "next-292");
+  assert.equal(replaced.setAt, "2026-09-20T10:00:00Z");
 });
 
-test("computeCodexTurnStateTtl counts down within the hour", () => {
-  const fresh = computeCodexTurnStateTtl(SET_AT, SET_AT_MS);
-  assert.equal(fresh.kind, "active");
-  assert.equal(fresh.remainingMs, CODEX_TURN_STATE_TTL_MS);
-  assert.equal(fresh.ratio, 1);
-  assert.equal(fresh.warning, false);
-
-  const halfway = computeCodexTurnStateTtl(SET_AT, SET_AT_MS + 30 * 60 * 1000);
-  assert.equal(halfway.kind, "active");
-  assert.equal(halfway.remainingMs, 30 * 60 * 1000);
-  assert.equal(halfway.ratio, 0.5);
-  assert.equal(halfway.warning, false);
-
-  const nearEnd = computeCodexTurnStateTtl(SET_AT, SET_AT_MS + 51 * 60 * 1000);
-  assert.equal(nearEnd.kind, "active");
-  assert.equal(nearEnd.remainingMs, 9 * 60 * 1000);
-  assert.equal(nearEnd.warning, true);
+test("292 tokens remain pinned regardless of old, missing, invalid or future timestamps", () => {
+  for (const setAt of ["2000-01-01T00:00:00Z", "", undefined, "invalid", "2099-01-01T00:00:00Z"]) {
+    const server = { codex_turn_state: "pinned-292", codex_turn_state_set_at: setAt };
+    const initial = syncCodexTurnStateDraft(null, server);
+    assert.equal(initial.value, "pinned-292");
+    assert.equal(syncCodexTurnStateDraft(initial, server), initial);
+    assert.equal(initial.dirty, false);
+  }
 });
 
-test("computeCodexTurnStateTtl clamps a future set_at to the full TTL", () => {
-  const skewed = computeCodexTurnStateTtl(SET_AT, SET_AT_MS - 5 * 60 * 1000);
-  assert.equal(skewed.kind, "active");
-  assert.equal(skewed.remainingMs, CODEX_TURN_STATE_TTL_MS);
-  assert.equal(skewed.ratio, 1);
+test("updating only the recorded timestamp retains the same token", () => {
+  const initial = syncCodexTurnStateDraft(null, snapshot());
+  const updated = syncCodexTurnStateDraft(initial, snapshot("pinned-292", "2026-09-20T10:00:00Z"));
+  assert.equal(updated.value, "pinned-292");
+  assert.equal(updated.setAt, "2026-09-20T10:00:00Z");
+  assert.equal(updated.dirty, false);
 });
 
-test("computeCodexTurnStateTtl reports expired at and after the hour", () => {
-  assert.deepEqual(computeCodexTurnStateTtl(SET_AT, SET_AT_MS + CODEX_TURN_STATE_TTL_MS), {
-    kind: "expired",
-    remainingMs: 0,
-  });
-  assert.deepEqual(computeCodexTurnStateTtl(SET_AT, SET_AT_MS + 2 * CODEX_TURN_STATE_TTL_MS), {
-    kind: "expired",
-    remainingMs: 0,
-  });
+test("manual new token and explicit clear survive repeated background pin and clear", () => {
+  for (const value of ["unsaved-token", ""]) {
+    let draft = syncCodexTurnStateDraft(null, snapshot());
+    draft = editCodexTurnStateDraft(draft, value);
+    assert.equal(draft.dirty, true);
+    for (const server of [snapshot("background-292"), {}, snapshot()]) {
+      draft = syncCodexTurnStateDraft(draft, server);
+      assert.equal(draft.value, value);
+      assert.equal(draft.dirty, true);
+    }
+  }
 });
 
-test("formatCodexTurnStateCountdown renders mm:ss with ceil to the second", () => {
-  assert.equal(formatCodexTurnStateCountdown(CODEX_TURN_STATE_TTL_MS), "60:00");
-  assert.equal(formatCodexTurnStateCountdown(59 * 60 * 1000 + 59_500), "60:00");
-  assert.equal(formatCodexTurnStateCountdown(9 * 60 * 1000 + 5_000), "09:05");
-  assert.equal(formatCodexTurnStateCountdown(999), "00:01");
-  assert.equal(formatCodexTurnStateCountdown(0), "00:00");
-  assert.equal(formatCodexTurnStateCountdown(-5_000), "00:00");
+test("backend clear still clears an untouched field", () => {
+  const initial = syncCodexTurnStateDraft(null, snapshot());
+  const cleared = syncCodexTurnStateDraft(initial, {});
+  assert.deepEqual(cleared, { value: "", savedValue: "", setAt: "", dirty: false });
+});
+
+test("reverting a manual edit to the latest server value resumes synchronization", () => {
+  let draft = syncCodexTurnStateDraft(null, snapshot());
+  draft = editCodexTurnStateDraft(draft, "unsaved-token");
+  draft = syncCodexTurnStateDraft(draft, snapshot("next-292"));
+  draft = editCodexTurnStateDraft(draft, "next-292");
+  assert.equal(draft.dirty, false);
+  assert.equal(syncCodexTurnStateDraft(draft, {}).value, "");
 });

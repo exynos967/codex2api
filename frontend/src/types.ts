@@ -345,8 +345,10 @@ export interface AccountRow {
   codex_turn_state_refresh_enabled?: string
   /** Dedicated proxy URL for turn-state refresh probing; empty = use the account's own proxy. */
   codex_turn_state_refresh_proxy?: string
-  /** Persistent refine loop probing until a non-degraded token lands; "true" = on. */
+  /** Persistent refine loop probing until a 292 token lands; "true" = on. */
   codex_turn_state_refine_enabled?: string
+  /** Require a 292 Turn-State response before forwarding; "true" = on. */
+  codex_turn_state_require_292?: string
   /** Whether the refine loop is currently running (runtime state, not persisted). */
   codex_turn_state_refining?: boolean
   /** Total probes fired by the running refine loop (runtime, reset on start/stop). */
@@ -1478,8 +1480,10 @@ export interface UpdateAccountSchedulerRequest {
   codex_turn_state_refresh_enabled?: string | null
   /** Dedicated proxy for refresh probing; empty = account's own proxy. */
   codex_turn_state_refresh_proxy?: string | null
-  /** "true"/"false": persistent refine loop probing until a non-degraded token lands. */
+  /** "true"/"false": persistent refine loop probing until a 292 token lands. */
   codex_turn_state_refine_enabled?: string | null
+  /** "true"/"false": require a 292 Turn-State response before forwarding. */
+  codex_turn_state_require_292?: string | null
 }
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {

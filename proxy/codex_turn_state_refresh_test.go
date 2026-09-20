@@ -169,8 +169,9 @@ func waitRefineStopped(t *testing.T, h *Handler, id int64) {
 		r.mu.Lock()
 		_, running := r.running[id]
 		_, refining := r.refine[id]
+		_, strict := r.strict[id]
 		r.mu.Unlock()
-		if !running && !refining {
+		if !running && !refining && !strict {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -335,4 +336,3 @@ func TestCodexTurnStateRefineSwitchOffExits(t *testing.T) {
 	account.Mu().Unlock()
 	waitRefineStopped(t, h, account.ID())
 }
-

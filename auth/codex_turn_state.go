@@ -16,7 +16,7 @@ const (
 	CodexTurnStateCredentialKey       = "codex_turn_state"
 	CodexTurnStateModelsCredentialKey = "codex_turn_state_models"
 	// CodexTurnStateSetAtCredentialKey 记录注入值最后一次被换掉的时刻（RFC3339）。
-	// 只服务于界面上的 1 小时时效倒计时：换值时重置，只改模型名单时保持不变。
+	// 仅记录换值时间，不代表上游有效期；只改模型名单时保持不变。
 	CodexTurnStateSetAtCredentialKey = "codex_turn_state_set_at"
 
 	// CodexTurnStateRefreshEnabledCredentialKey / CodexTurnStateRefreshProxyCredentialKey
@@ -30,6 +30,8 @@ const (
 	// 死磕循环）：开启后不限次数连续探测，直到拿到 292 不降智 token 才停，
 	// 期间自动刷新的周期/反应式触发对该账号静默（同一探测通道已在跑）。
 	CodexTurnStateRefineEnabledCredentialKey = "codex_turn_state_refine_enabled"
+	// CodexTurnStateRequire292CredentialKey 要求请求只能使用 292 形态的 turn-state。
+	CodexTurnStateRequire292CredentialKey = "codex_turn_state_require_292"
 
 	// Codex turn-state token 形态（参考 turnstate 过滤器实测）：292 可复用不降智，
 	// 312 为 IP 绑定的降智形态。
@@ -184,6 +186,7 @@ func (a *Account) setCodexTurnStateFromRowLocked(row interface {
 	a.CodexTurnStateRefreshEnabled = parseTruthyCredential(row.GetCredential(CodexTurnStateRefreshEnabledCredentialKey))
 	a.CodexTurnStateRefreshProxy = strings.TrimSpace(row.GetCredential(CodexTurnStateRefreshProxyCredentialKey))
 	a.CodexTurnStateRefineEnabled = parseTruthyCredential(row.GetCredential(CodexTurnStateRefineEnabledCredentialKey))
+	a.CodexTurnStateRequire292 = parseTruthyCredential(row.GetCredential(CodexTurnStateRequire292CredentialKey))
 }
 
 // parseTruthyCredential 解析凭据里的布尔开关（"1"/"true"/"yes"/"on" 为真）。
@@ -229,7 +232,8 @@ func (s *Store) ApplyCodexTurnStateRefreshResult(ctx context.Context, id int64, 
 	}
 	value = strings.TrimSpace(value)
 	setAt := time.Now().UTC()
-	_, applied, err := s.db.UpdateAccountCredentialsCAS(ctx, id, a.GetCredentialGeneration(), map[string]any{
+	generation := a.GetCredentialGeneration()
+	newGeneration, applied, err := s.db.UpdateAccountCredentialsCAS(ctx, id, generation, map[string]any{
 		CodexTurnStateCredentialKey:      value,
 		CodexTurnStateSetAtCredentialKey: setAt.Format(time.RFC3339),
 	})
@@ -240,8 +244,13 @@ func (s *Store) ApplyCodexTurnStateRefreshResult(ctx context.Context, id int64, 
 		return fmt.Errorf("账号 %d 凭据代际冲突，刷新结果未落库", id)
 	}
 	a.mu.Lock()
-	a.CodexTurnState = value
-	a.CodexTurnStateSetAt = setAt
+	// CAS推进了数据库代际；同步运行时以允许下一轮保存。
+	// 已有更晚的管理/凭据更新时不回退其快照，outbox也可能已经发布本次结果。
+	if a.CredentialGeneration == generation {
+		a.CredentialGeneration = newGeneration
+		a.CodexTurnState = value
+		a.CodexTurnStateSetAt = setAt
+	}
 	a.mu.Unlock()
 	return nil
 }
@@ -271,6 +280,25 @@ func (s *Store) ApplyAccountCodexTurnStateRefresh(id int64, enabled bool, proxyU
 		a.mu.Lock()
 		a.CodexTurnStateRefreshEnabled = enabled
 		a.CodexTurnStateRefreshProxy = strings.TrimSpace(proxyURL)
+		a.mu.Unlock()
+	}
+}
+
+// IsCodexTurnStateRequire292 返回严格 292 开关快照；默认关闭。
+func (a *Account) IsCodexTurnStateRequire292() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.CodexTurnStateRequire292
+}
+
+// ApplyAccountCodexTurnStateRequire292 把管理端保存的严格 292 开关发布到运行时。
+func (s *Store) ApplyAccountCodexTurnStateRequire292(id int64, enabled bool) {
+	if a := s.FindByID(id); a != nil {
+		a.mu.Lock()
+		a.CodexTurnStateRequire292 = enabled
 		a.mu.Unlock()
 	}
 }

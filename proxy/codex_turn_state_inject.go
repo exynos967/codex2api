@@ -74,6 +74,20 @@ func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, 
 	}
 	upstreamModel := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
 	injected := account.CodexTurnStateInjection(codexClientModelFromContext(ctx), upstreamModel)
+	if strict := strict292Attempt(ctx); strict != nil {
+		strict.model, strict.websocket = upstreamModel, websocket
+		strict.preserveContinuation = websocket && strings.TrimSpace(gjson.GetBytes(requestBody, "previous_response_id").String()) != ""
+		// 强制模式覆盖模型scope，清掉下游回带的旧state；只注入当前已验证候选值。
+		injected = strict.token
+		if headers == nil {
+			headers = make(http.Header)
+		} else {
+			headers = headers.Clone()
+		}
+		headers.Del(codexTurnStateHeader)
+		requestBody, _ = sjson.DeleteBytes(requestBody, "client_metadata."+codexTurnStateMetadataKey)
+		ctx = withCodexTurnStateInjection(ctx, injected)
+	}
 	if injected == "" {
 		return ctx, requestBody, headers
 	}
@@ -99,6 +113,9 @@ func prepareCodexTurnStateInjection(ctx context.Context, account *auth.Account, 
 func applyCodexTurnStateInjectionHeader(ctx context.Context, headers http.Header) {
 	if headers == nil {
 		return
+	}
+	if strict292Attempt(ctx) != nil {
+		headers.Del(codexTurnStateHeader)
 	}
 	if value := CodexTurnStateInjectionFromContext(ctx); value != "" {
 		headers.Set(codexTurnStateHeader, value)
@@ -152,7 +169,7 @@ func codexTurnStateFromFrame(payload []byte) string {
 	if !root.IsObject() {
 		return ""
 	}
-	for _, path := range []string{"headers", "response.headers", "response.client_metadata", "client_metadata", "response.metadata", "metadata", "response", ""} {
+	for _, path := range []string{"headers", "response.headers", "response.client_metadata", "client_metadata", "response.metadata", "metadata", "response.metadata.headers", "metadata.headers", "response", ""} {
 		object := root
 		if path != "" {
 			object = root.Get(path)
@@ -189,7 +206,9 @@ func ObserveCodexTurnStateFrame(ctx context.Context, payload []byte) {
 				accountID = a.current.accountID
 			}
 			a.mu.Unlock()
-			observeDegradedTurnState(accountID, state)
+			if strict292Attempt(ctx) == nil {
+				observeDegradedTurnState(accountID, state)
+			}
 		}
 	}
 	if model := codexUpstreamModelFromFrame(payload); model != "" {

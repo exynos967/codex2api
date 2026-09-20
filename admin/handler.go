@@ -1696,6 +1696,7 @@ type accountResponse struct {
 	CodexTurnStateRefreshProxy    string                      `json:"codex_turn_state_refresh_proxy,omitempty"`
 	// 死磕刷新：开关落凭据；refining 是运行时状态（循环是否正在跑），不落库。
 	CodexTurnStateRefineEnabled string `json:"codex_turn_state_refine_enabled,omitempty"`
+	CodexTurnStateRequire292      string                     `json:"codex_turn_state_require_292,omitempty"`
 	CodexTurnStateRefining      bool   `json:"codex_turn_state_refining,omitempty"`
 	CodexTurnStateRefineProbes  int64  `json:"codex_turn_state_refine_probes,omitempty"`
 	CustomHeaders                 map[string]string           `json:"custom_headers,omitempty"`
@@ -2163,6 +2164,7 @@ type updateAccountSchedulerReq struct {
 	CodexTurnStateRefreshProxy   json.RawMessage `json:"codex_turn_state_refresh_proxy"`
 	// 死磕刷新开关（见 proxy/codex_turn_state_refresh.go 死磕循环）。
 	CodexTurnStateRefineEnabled json.RawMessage `json:"codex_turn_state_refine_enabled"`
+	CodexTurnStateRequire292    json.RawMessage `json:"codex_turn_state_require_292"`
 }
 
 type accountSchedulerUpdate struct {
@@ -2195,6 +2197,7 @@ type accountSchedulerUpdate struct {
 	// 死磕刷新开关（值落凭据；运行时同步走 ApplyAccountCodexTurnStateRefine
 	// 并启停 proxy 侧死磕循环）。
 	CodexTurnStateRefineEnabled database.OptionalString
+	CodexTurnStateRequire292    database.OptionalString
 	CredentialUpdates           map[string]interface{}
 }
 
@@ -2324,6 +2327,13 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if err != nil {
 		return accountSchedulerUpdate{}, err
 	}
+	codexTurnStateRequire292Field, err := parseOptionalStringField(req.CodexTurnStateRequire292, "codex_turn_state_require_292", validateTruthyFlag)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	if codexTurnStateRequire292Field.Set {
+		codexTurnStateRequire292Field.Value = normalizeTruthyFlag(codexTurnStateRequire292Field.Value)
+	}
 	if codexFingerprintMode.Set {
 		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
 	}
@@ -2358,7 +2368,7 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	}
 	if codexTurnStateField.Set {
 		credentialUpdates[auth.CodexTurnStateCredentialKey] = codexTurnStateField.Value
-		// 时效起点默认随值一起刷新（批量接口拿不到逐账号旧值，只能按"换了新值"处理）；
+		// 换值时间默认随值一起刷新（批量接口拿不到逐账号旧值，只能按"换了新值"处理）；
 		// 单账号接口在值未变且已有起点时保留旧起点，见 refineCodexTurnStateSetAt。
 		setAt := ""
 		if codexTurnStateField.Value != "" {
@@ -2377,6 +2387,9 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	}
 	if codexTurnStateRefineEnabledField.Set {
 		credentialUpdates[auth.CodexTurnStateRefineEnabledCredentialKey] = codexTurnStateRefineEnabledField.Value
+	}
+	if codexTurnStateRequire292Field.Set {
+		credentialUpdates[auth.CodexTurnStateRequire292CredentialKey] = codexTurnStateRequire292Field.Value
 	}
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
@@ -2442,8 +2455,17 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 		CodexTurnStateRefreshEnabled: codexTurnStateRefreshEnabledField,
 		CodexTurnStateRefreshProxy:   codexTurnStateRefreshProxyField,
 		CodexTurnStateRefineEnabled:  codexTurnStateRefineEnabledField,
+		CodexTurnStateRequire292:     codexTurnStateRequire292Field,
 		CredentialUpdates:            credentialUpdates,
 	}, nil
+}
+
+func normalizeTruthyFlag(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
+		return "true"
+	}
+	return "false"
 }
 
 // validateTruthyFlag 允许 "true"/"false"/""（关）。
@@ -2531,9 +2553,8 @@ func validateCodexFingerprintMode(value string) error {
 	return errors.New("必须是 off、device、session 或 full")
 }
 
-// refineCodexTurnStateSetAt 让时效起点只在注入值真正换掉时重置：原样重提同一个值不
-// 重置（它还是上游那时候签发的那一个 state）；存量行没有起点时补一次，让倒计时能从
-// 这一刻开始走，而不是逼用户先清空再粘贴一遍。
+// refineCodexTurnStateSetAt 只在注入值真正换掉时重置设置时间；原样重提保留旧记录，
+// 历史行缺少设置时间时补记本次保存时间。该字段不代表上游签发时间或有效期。
 func refineCodexTurnStateSetAt(row *database.AccountRow, update accountSchedulerUpdate) {
 	if row == nil || !update.CodexTurnState.Set || update.CodexTurnState.Value == "" {
 		return
@@ -2552,6 +2573,7 @@ func (u accountSchedulerUpdate) hasChanges() bool {
 		u.CodexTurnStateRefreshEnabled.Set ||
 		u.CodexTurnStateRefreshProxy.Set ||
 		u.CodexTurnStateRefineEnabled.Set ||
+		u.CodexTurnStateRequire292.Set ||
 		u.BaseConcurrencyOverride.Set ||
 		u.SkipWarmTier.Set ||
 		u.AllowedAPIKeyIDs.Set ||
@@ -2884,6 +2906,9 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 			}
 			h.store.ApplyAccountCodexTurnStateRefresh(id, enabled, proxyURL)
 		}
+	}
+	if update.CodexTurnStateRequire292.Set {
+		h.store.ApplyAccountCodexTurnStateRequire292(id, normalizeTruthyFlag(update.CodexTurnStateRequire292.Value) == "true")
 	}
 	if update.CodexTurnStateRefineEnabled.Set {
 		enabled := update.CodexTurnStateRefineEnabled.Value == "true"
