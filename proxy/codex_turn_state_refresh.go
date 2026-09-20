@@ -441,15 +441,17 @@ func (h *Handler) CodexTurnStateRefineStats(accountID int64) (refining bool, pro
 
 // codexTurnStateRefineParallel 死磕单轮并发探测数。轮换代理池每次连接换出口
 // IP，但是否实际轮换取决于代理配置；取消前已经发出的请求仍可能消耗额度。
-// CODEX_TURN_STATE_REFINE_PARALLEL 可调（1-8，默认 8；1 = 退回串行形态）。
+// CODEX_TURN_STATE_REFINE_PARALLEL 可调（1-8，默认 6；1 = 退回串行形态）。
+// 默认 6：8 并发把命中窗口缩到极致，但上游看到的请求形态也最热闹（实测
+// 偶发 429 与 TLS EOF）；6 在命中速度和请求形态之间折中。
 func codexTurnStateRefineParallel() int {
 	raw := strings.TrimSpace(os.Getenv("CODEX_TURN_STATE_REFINE_PARALLEL"))
 	if raw == "" {
-		return 8
+		return 6
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 1 {
-		return 8
+		return 6
 	}
 	if n > 8 {
 		return 8

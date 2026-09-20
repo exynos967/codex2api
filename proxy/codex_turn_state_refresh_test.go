@@ -235,7 +235,7 @@ func TestCodexTurnStateRefinePins292AndExits(t *testing.T) {
 	}
 }
 
-// TestCodexTurnStateRefineProbesCounter 死磕探测计数：一轮 8 并发未中即 +8，
+// TestCodexTurnStateRefineProbesCounter 死磕探测计数：默认一轮 6 并发未中即 +6，
 // 供 UI 显示"已刷新 N 次"。
 func TestCodexTurnStateRefineProbesCounter(t *testing.T) {
 	oldDelay := codexTurnStateProbeDelay
@@ -257,9 +257,9 @@ func TestCodexTurnStateRefineProbesCounter(t *testing.T) {
 	if !h.StartCodexTurnStateRefine(account) {
 		t.Fatal("死磕循环应成功启动")
 	}
-	// 等至少两轮落地（一轮 +8），再核对计数。
+	// 等至少两轮落地（默认一轮 +6），再核对计数。
 	for i := 0; i < 500; i++ {
-		if _, probes := h.CodexTurnStateRefineStats(account.ID()); probes >= 16 {
+		if _, probes := h.CodexTurnStateRefineStats(account.ID()); probes >= 12 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -268,8 +268,8 @@ func TestCodexTurnStateRefineProbesCounter(t *testing.T) {
 	if !refining {
 		t.Fatal("计数阶段循环应在跑")
 	}
-	if probes < 16 || probes%8 != 0 {
-		t.Errorf("探测计数 = %d, want >= 16 且为 8 的倍数", probes)
+	if probes < 12 || probes%6 != 0 {
+		t.Errorf("探测计数 = %d, want >= 12 且为 6 的倍数", probes)
 	}
 	h.StopCodexTurnStateRefine(account.ID())
 	waitRefineStopped(t, h, account.ID())
