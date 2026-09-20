@@ -3,7 +3,9 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -66,7 +68,21 @@ func executeWithCodex292Gate(ctx context.Context, account *auth.Account, proxyOv
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
 			}
-			return nil, errCodex292Gate("强制292验证失败，未转发上游内容", err)
+			transport := "http"
+			if attempt.websocket {
+				transport = "ws"
+			}
+			status, headerCount, headerLength := 0, 0, 0
+			if resp != nil {
+				status = resp.StatusCode
+				headerCount = len(resp.Header.Values(codexTurnStateHeader))
+				headerLength = len(strings.TrimSpace(resp.Header.Get(codexTurnStateHeader)))
+			}
+			// verify仅生成固定原因/长度/计数，不含token、帧正文或底层私密错误。
+			// WS header是握手快照，日志仅辅助诊断，仍不能作为本轮验证依据。
+			log.Printf("[turn-state-gate] account=%d transport=%s http_status=%d state_header_count=%d state_header_length=%d injected_length=%d verify_failed=%v", account.ID(), transport, status, headerCount, headerLength, len(attempt.token), err)
+			message := fmt.Sprintf("强制292验证失败，未转发上游内容（%s）：%v", transport, err)
+			return nil, errCodex292Gate(message, err)
 		}
 		if accepted {
 			if resp == nil || resp.Body == nil {
@@ -87,6 +103,7 @@ func executeWithCodex292Gate(ctx context.Context, account *auth.Account, proxyOv
 				return nil, errCodex292Gate("强制292重试无法恢复完整续聊上下文", err)
 			}
 		}
+		log.Printf("[turn-state-gate] account=%d observed_length=312 action=refresh_then_replay", account.ID())
 		token, err = refreshCodexTurnStateForStrictRequest(ctx, account, attempt.model, proxyOverride)
 		if err != nil {
 			return nil, errCodex292Gate("强制292刷新未完成，未转发被拦截响应", err)

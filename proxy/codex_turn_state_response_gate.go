@@ -76,6 +76,12 @@ func verifyCodex292Response(ctx context.Context, resp *http.Response, websocket 
 	var raw, data bytes.Buffer
 	lineStart := 0
 	saw292, terminal := false, false
+	frames := 0
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("%w (frames=%d bytes=%d saw292=%t terminal=%t)", err, frames, raw.Len(), saw292, terminal)
+		}
+	}()
 	rejected := false
 	preserveContinuation := strict292Attempt(ctx) != nil && strict292Attempt(ctx).preserveContinuation
 	verifiedState := ""
@@ -125,6 +131,7 @@ func verifyCodex292Response(ctx context.Context, resp *http.Response, websocket 
 			if !hasData {
 				continue
 			}
+			frames++
 			payload := data.Bytes()
 			if !gjson.ValidBytes(payload) || !gjson.ParseBytes(payload).IsObject() {
 				return false, errors.New("codex 292 response invalid JSON frame")
@@ -166,7 +173,7 @@ func verifyCodex292Response(ctx context.Context, resp *http.Response, websocket 
 			}
 			switch eventType.String() {
 			case "response.failed", "response.incomplete", "error":
-				return false, fmt.Errorf("codex 292 response unsuccessful event %s", eventType.String())
+				return false, fmt.Errorf("codex 292 response unsuccessful event %s (%s)", eventType.String(), codex292FailureSummary(payload))
 			case "response.completed", "response.done":
 				status := gjson.GetBytes(payload, "response.status")
 				if status.Exists() && status.String() != "completed" {
@@ -250,4 +257,32 @@ type codex292ReplayBody struct {
 func (b *codex292ReplayBody) Close() error {
 	b.once.Do(func() { b.closeErr = b.original.Close() })
 	return b.closeErr
+}
+
+// 上游message可能回显prompt/token；只输出已知错误码和合法HTTP状态。
+func codex292FailureSummary(payload []byte) string {
+	code := "unknown_or_absent"
+	for _, path := range []string{"response.error.code", "error.code", "response.error.type", "error.type"} {
+		candidate := gjson.GetBytes(payload, path).String()
+		switch candidate {
+		case "invalid_request_error", "authentication_error", "rate_limit_exceeded", "rate_limit_error",
+			"usage_limit_reached", "overloaded_error", "server_error", "internal_error", "model_not_found",
+			"unsupported_parameter", "invalid_value", "unsupported_value", "invalid_api_key", "unauthorized",
+			"permission_denied", "context_length_exceeded", "previous_response_not_found", "invalid_encrypted_content",
+			"websocket_connection_limit_reached", "insufficient_quota":
+			code = candidate
+		}
+		if code != "unknown_or_absent" {
+			break
+		}
+	}
+	status := int64(0)
+	for _, path := range []string{"response.status_code", "status_code", "error.status_code", "response.error.status_code", "status"} {
+		value := gjson.GetBytes(payload, path)
+		if value.Type == gjson.Number && value.Int() >= 100 && value.Int() <= 599 {
+			status = value.Int()
+			break
+		}
+	}
+	return fmt.Sprintf("upstream_status=%d upstream_code=%s", status, code)
 }
