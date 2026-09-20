@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -74,8 +76,9 @@ type TurnStateRefreshResult struct {
 var degradedTurnStateObserver atomic.Value // func(accountID int64)
 
 // observeDegradedTurnState 在观测点调用：值为降智形态时通知刷新器（异步、带冷却）。
+// 含 Team 356（13 块）降智形态，不只个人 312。
 func observeDegradedTurnState(accountID int64, state string) {
-	if len(strings.TrimSpace(state)) != auth.CodexTurnStateDegradedLength || accountID == 0 {
+	if accountID == 0 || !auth.IsCodexTurnStateDegraded(state) {
 		return
 	}
 	if fn, ok := degradedTurnStateObserver.Load().(func(int64)); ok && fn != nil {
@@ -131,9 +134,10 @@ func (h *Handler) StartCodexTurnStateRefresh(ctx context.Context) {
 		})
 		// 启动扫描：死磕开关已开的账号立即起循环（不依赖巡检间隔——
 		// 巡检可能被 CODEX_TURN_STATE_REFRESH_INTERVAL=0 关闭，死磕独立）。
+		// 已有新鲜好 token 的账号不占探测通道（按内嵌签发时间判新鲜）。
 		for _, account := range h.store.Accounts() {
 			pinned, _, _ := account.CodexTurnStateConfig()
-			if len(pinned) == auth.CodexTurnStateGoodLength {
+			if codexTurnStatePinnedFresh(pinned) {
 				continue
 			}
 			if account.IsCodexTurnStateRefineEnabled() {
@@ -159,6 +163,16 @@ func (h *Handler) StartCodexTurnStateRefresh(ctx context.Context) {
 	})
 }
 
+// codexTurnStatePinnedFresh 报告固定的 token 是否处于"无需主动换"的新鲜期：
+// 形态正常（含 Team 332）且未到内嵌签发时间的提前刷新窗口（签发 20 分钟）。
+// 解析不出签发时间的存量值按新鲜处理，与旧版"有 292 就不动"行为一致。
+func codexTurnStatePinnedFresh(pinned string) bool {
+	if !auth.IsCodexTurnStateGood(pinned) {
+		return false
+	}
+	return !auth.CodexTurnStateRefreshDueByIssue(pinned, time.Now())
+}
+
 // refreshAllEnabledAccounts 巡检所有开启刷新的账号（并发 1，避免探测风暴）。
 func (h *Handler) refreshAllEnabledAccounts(ctx context.Context) {
 	for _, account := range h.store.Accounts() {
@@ -169,9 +183,10 @@ func (h *Handler) refreshAllEnabledAccounts(ctx context.Context) {
 		if !enabled {
 			continue
 		}
-		// 已有292不按保存时间换掉；实际响应出现312由观测路径触发刷新。
+		// 新鲜好 token（按内嵌签发时间，含 Team 332）不重复刷；到提前刷新
+		// 窗口（签发 20 分钟）或观测到 312 才主动换——不再按"有 292 就永远不动"。
 		pinned, _, _ := account.CodexTurnStateConfig()
-		if len(pinned) == auth.CodexTurnStateGoodLength {
+		if codexTurnStatePinnedFresh(pinned) {
 			continue
 		}
 		if h.CodexTurnStateRefining(account.ID()) {
@@ -331,22 +346,25 @@ func (h *Handler) refreshCodexTurnStateWith(ctx context.Context, account *auth.A
 		}
 		lastLength = len(state)
 		result := TurnStateRefreshResult{Length: len(state)}
-		switch len(state) {
-		case auth.CodexTurnStateGoodLength:
+		class, _ := auth.ClassifyCodexTurnState(state)
+		switch class {
+		case auth.CodexTurnStateClassGood:
 			if err := h.store.ApplyCodexTurnStateRefreshResult(ctx, account.ID(), state); err != nil {
 				result.Error = err.Error()
 				return result, err
 			}
 			result.Pinned = true
 			result.State = state
-			log.Printf("[turn-state-refresh] account=%d model=%s 第 %d/%d 次探测固定 292 token", account.ID(), model, attempt, maxAttempts)
+			log.Printf("[turn-state-refresh] account=%d model=%s 第 %d/%d 次探测固定正常 token（长度 %d）", account.ID(), model, attempt, maxAttempts, len(state))
 			return result, nil
-		case auth.CodexTurnStateDegradedLength:
-			lastErr = fmt.Errorf("上游返回降智形态（312）")
-		case 0:
-			lastErr = fmt.Errorf("上游未回传 turn-state（HTTP %d）", status)
-		default:
-			lastErr = fmt.Errorf("未知形态长度 %d（HTTP %d）", len(state), status)
+		case auth.CodexTurnStateClassDegraded:
+			lastErr = fmt.Errorf("上游返回降智形态（长度 %d）", len(state))
+		case auth.CodexTurnStateClassUnknown:
+			if len(state) == 0 {
+				lastErr = fmt.Errorf("上游未回传 turn-state（HTTP %d）", status)
+			} else {
+				lastErr = fmt.Errorf("未知形态长度 %d（HTTP %d）", len(state), status)
+			}
 		}
 	}
 	result := TurnStateRefreshResult{Length: lastLength, Error: fmt.Sprintf("%d 次探测均未拿到非降智 token：%v；请检查专用代理出口 IP 池", maxAttempts, lastErr)}
@@ -567,21 +585,25 @@ func (h *Handler) probeCodexTurnStateUntilGood(ctx context.Context, accountID in
 					lastErr = out.err
 				}
 			} else {
-				switch len(out.state) {
-				case auth.CodexTurnStateDegradedLength:
+				class, _ := auth.ClassifyCodexTurnState(out.state)
+				switch class {
+				case auth.CodexTurnStateClassDegraded:
 					degraded++
-				case 0:
-					empty++
-				case auth.CodexTurnStateGoodLength:
+				case auth.CodexTurnStateClassGood:
+					// hit 判定在下方统一处理
 				default:
-					other++
+					if len(out.state) == 0 {
+						empty++
+					} else {
+						other++
+					}
 				}
 			}
 			if out.err != nil && codexTurnStateProbeRequiresCorrection(out.status) {
 				correctionErr = out.err
 				cancelRound()
 			}
-			if out.err == nil && len(out.state) == auth.CodexTurnStateGoodLength && hit == "" {
+			if out.err == nil && hit == "" && auth.IsCodexTurnStateGood(out.state) {
 				hit = out.state
 				cancelRound()
 			}
@@ -674,7 +696,38 @@ func (h *Handler) probeCodexTurnState(ctx context.Context, account *auth.Account
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return "", resp.StatusCode, fmt.Errorf("turn-state 探测被拒绝：HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
-	return strings.TrimSpace(resp.Header.Get(codexTurnStateHeader)), resp.StatusCode, nil
+	state = strings.TrimSpace(resp.Header.Get(codexTurnStateHeader))
+	class, _ := auth.ClassifyCodexTurnState(state)
+	if class != auth.CodexTurnStateClassGood {
+		return state, resp.StatusCode, nil
+	}
+	// 候选好 token：要求本次响应正常完成才采信（对齐 sleep-state 预热成功条件）——
+	// 头先报好形状但回合 failed/incomplete/error 的 state 不固定，按"未取到"重试。
+	// 流正常 EOF 且未见失败事件也算完成；显式 failed/error 才否决。
+	if !codexTurnStateProbeStreamCompleted(resp.Body) {
+		return "", resp.StatusCode, nil
+	}
+	return state, resp.StatusCode, nil
+}
+
+// codexTurnStateProbeStreamCompleted 判定探测 SSE 是否正常完成：读到
+// response.completed 或流正常 EOF（且未遇 response.failed/error）为完成。
+// 最多读 1 MiB，防止异常大流拖住探测。
+func codexTurnStateProbeStreamCompleted(body io.Reader) bool {
+	reader := bufio.NewReader(io.LimitReader(body, 1<<20))
+	for {
+		line, err := reader.ReadBytes('\n')
+		if bytes.Contains(line, []byte(`"type":"response.failed"`)) || bytes.Contains(line, []byte(`"type":"error"`)) {
+			return false
+		}
+		if bytes.Contains(line, []byte(`"type":"response.completed"`)) {
+			return true
+		}
+		if err != nil {
+			// EOF 或其它读取结束：未见失败事件即视为完成。
+			return true
+		}
+	}
 }
 
 // 403可能是出口拦截，408/429可重试；其它4xx需修正请求或凭据。

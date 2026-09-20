@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   syncCodexTurnStateDraft,
   editCodexTurnStateDraft,
+  formatCodexTurnStateIssued,
 } from "./codexTurnState.ts";
 
 const snapshot = (value = "pinned-292", setAt = "2020-01-01T00:00:00Z") => ({
@@ -65,4 +66,28 @@ test("reverting a manual edit to the latest server value resumes synchronization
   draft = editCodexTurnStateDraft(draft, "next-292");
   assert.equal(draft.dirty, false);
   assert.equal(syncCodexTurnStateDraft(draft, {}).value, "");
+});
+
+test("issued time formats a valid embedded timestamp without refresh warning", () => {
+  const issued = formatCodexTurnStateIssued(
+    "2026-09-20T14:28:05Z",
+    Date.parse("2026-09-20T14:30:00Z"),
+  );
+  assert.deepEqual(issued, { text: "2026-09-20 14:28 UTC", nearRefresh: false });
+});
+
+test("issued time is hidden for empty, missing or invalid values", () => {
+  for (const value of ["", "   ", undefined, "not-a-date", "2026-13-99"]) {
+    assert.equal(formatCodexTurnStateIssued(value), null);
+  }
+});
+
+test("issued time flags the last 20 minutes and expired tokens as near refresh", () => {
+  const issuedAt = "2026-09-20T14:28:00Z";
+  const insideWindow = formatCodexTurnStateIssued(issuedAt, Date.parse("2026-09-20T15:09:00Z"));
+  assert.equal(insideWindow.nearRefresh, true);
+  const expired = formatCodexTurnStateIssued(issuedAt, Date.parse("2026-09-20T15:30:00Z"));
+  assert.equal(expired.nearRefresh, true);
+  const outsideWindow = formatCodexTurnStateIssued(issuedAt, Date.parse("2026-09-20T15:08:00Z"));
+  assert.equal(outsideWindow.nearRefresh, false);
 });

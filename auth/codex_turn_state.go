@@ -33,10 +33,13 @@ const (
 	// CodexTurnStateRequire292CredentialKey 要求请求只能使用 292 形态的 turn-state。
 	CodexTurnStateRequire292CredentialKey = "codex_turn_state_require_292"
 
-	// Codex turn-state token 形态（参考 turnstate 过滤器实测）：292 可复用不降智，
-	// 312 为 IP 绑定的降智形态。
-	CodexTurnStateGoodLength     = 292
-	CodexTurnStateDegradedLength = 312
+	// Codex turn-state token 形态：292 可复用不降智，312 为 IP 绑定降智；
+	// Team 账号对应 332 / 356。这些长度是 Fernet 封装的编码表象，块数分类
+	// 与内嵌签发时间见 codex_turn_state_fernet.go。
+	CodexTurnStateGoodLength         = 292
+	CodexTurnStateDegradedLength     = 312
+	CodexTurnStateTeamGoodLength     = 332
+	CodexTurnStateTeamDegradedLength = 356
 
 	// maxCodexTurnStateBytes：实测值在 300 字符上下，留一个数量级余量即可。
 	maxCodexTurnStateBytes       = 4096
@@ -162,6 +165,12 @@ func (a *Account) CodexTurnStateInjection(models ...string) string {
 	a.mu.RUnlock()
 	value = strings.TrimSpace(value)
 	if value == "" || !CodexTurnStateModelsMatch(scope, models...) {
+		return ""
+	}
+	// 内嵌签发时间已过寿命的 token 上游必然拒收，继续注入是把请求往错误里送。
+	// 返回空让本次按"无可用注入"直发；刷新链路（提前窗口 + 观测 312）会补新值。
+	// 只认 token 内嵌签发时间，与保存进网关的时刻无关；解析不出的存量值不受影响。
+	if CodexTurnStateExpiredByIssue(value, time.Now()) {
 		return ""
 	}
 	return value

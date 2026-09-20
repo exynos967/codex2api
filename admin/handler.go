@@ -1692,6 +1692,8 @@ type accountResponse struct {
 	CodexTurnState                string                      `json:"codex_turn_state,omitempty"`
 	CodexTurnStateModels          string                      `json:"codex_turn_state_models,omitempty"`
 	CodexTurnStateSetAt           string                      `json:"codex_turn_state_set_at,omitempty"`
+	// CodexTurnStateIssuedAt 是 token 内嵌的 Fernet 签发时间（真实寿命起点，非保存时刻）。
+	CodexTurnStateIssuedAt        string                      `json:"codex_turn_state_issued_at,omitempty"`
 	CodexTurnStateRefreshEnabled  string                      `json:"codex_turn_state_refresh_enabled,omitempty"`
 	CodexTurnStateRefreshProxy    string                      `json:"codex_turn_state_refresh_proxy,omitempty"`
 	// 死磕刷新：开关落凭据；refining 是运行时状态（循环是否正在跑），不落库。

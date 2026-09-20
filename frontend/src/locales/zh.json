@@ -1731,6 +1731,8 @@
     "codexTurnStateTitle": "Turn State 强制注入",
     "codexTurnStateHint": "把这里填的 X-Codex-Turn-State 强制写到该账号的出站 Codex 请求上(HTTP 与 WebSocket 都覆盖),优先于客户端回带值与自定义请求头。留空并保存即关闭。",
     "codexTurnStatePersistenceHint": "已固定的 292 Turn-State 持续保留，不按时间清除。后台固定新值后自动回填；手动未保存的注入值不会被覆盖。",
+    "codexTurnStateIssuedAt": "签发于 {{time}} · 约 1 小时寿命（token 内嵌，非保存时间）",
+    "codexTurnStateIssuedNearRefresh": "临近提前刷新窗口",
     "codexTurnStateRequire292Label": "强制所有请求使用 292 Turn-State",
     "codexTurnStateRequire292Hint": "收到312时拦截响应，刷新并重新请求，只有验证为292才放行；缺失或未知状态报错。WS需等待完整响应验证，最多32MiB。等待可取消，保存后生效。",
     "codexTurnStateValueLabel": "注入值",

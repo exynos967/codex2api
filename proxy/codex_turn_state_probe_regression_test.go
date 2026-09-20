@@ -69,24 +69,51 @@ func TestTurnStateProbeUsesOfficialMessageInput(t *testing.T) {
 	_, _, _ = h.probeCodexTurnState(context.Background(), account, "test", "model", "")
 }
 
-// 已到达的响应头不应被后续迟迟不来的 SSE 体阻塞。
-func TestTurnStateProbeReturnsWithoutWaitingForSSEBody(t *testing.T) {
+// 候选好 token 必须等流确认完成才采信：292 头挂起时不应立即返回，
+// 直到 response.completed 才固定；这是与"读头即走"旧契约的刻意差异。
+func TestTurnStateProbeGoodHeaderWaitsForCompletion(t *testing.T) {
+	unblock := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(codexTurnStateHeader, strings.Repeat("a", auth.CodexTurnStateGoodLength))
 		w.WriteHeader(200)
 		w.(http.Flusher).Flush()
-		<-r.Context().Done()
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
 	}))
 	defer srv.Close()
 	old := codexTurnStateProbeURL
 	codexTurnStateProbeURL = srv.URL
 	defer func() { codexTurnStateProbeURL = old }()
 	h, account := newTurnStateTestHandler(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	state, _, err := h.probeCodexTurnState(ctx, account, "test", "model", "")
-	if err != nil || len(state) != auth.CodexTurnStateGoodLength || ctx.Err() != nil {
-		t.Fatalf("probe waited for body despite receiving token headers: length=%d err=%v ctx=%v", len(state), err, ctx.Err())
+	type outcome struct {
+		state string
+		err   error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		state, _, err := h.probeCodexTurnState(ctx, account, "test", "model", "")
+		done <- outcome{state, err}
+	}()
+	// 头已 flush 但流未完成：probe 必须仍在等待，不能凭头先返回。
+	select {
+	case out := <-done:
+		t.Fatalf("probe returned before stream completion: state length=%d err=%v", len(out.state), out.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(unblock)
+	select {
+	case out := <-done:
+		if out.err != nil || len(out.state) != auth.CodexTurnStateGoodLength {
+			t.Fatalf("probe did not pin after completion: state length=%d err=%v", len(out.state), out.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("probe did not return after stream completed")
 	}
 }
 
@@ -123,6 +150,40 @@ func TestTurnStateRefineStopsOnRejectedRequest(t *testing.T) {
 	waitRefineStopped(t, h, account.ID())
 	if calls.Load() != 1 {
 		t.Errorf("attempts=%d, want one rejected request", calls.Load())
+	}
+}
+
+// 候选好 token 必须本次响应正常完成才采信：头报 292 但回合 failed 不固定。
+func TestTurnStateProbeGoodHeaderRequiresCompletedStream(t *testing.T) {
+	good := strings.Repeat("a", auth.CodexTurnStateGoodLength)
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"completed 采信", `data: {"type":"response.completed"}` + "\n\n", good},
+		{"正常EOF采信", "data: {}\n\n", good},
+		{"failed 不采信", `data: {"type":"response.failed"}` + "\n\n", ""},
+		{"error 不采信", `data: {"type":"error"}` + "\n\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(codexTurnStateHeader, good)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			old := codexTurnStateProbeURL
+			codexTurnStateProbeURL = srv.URL
+			defer func() { codexTurnStateProbeURL = old }()
+			h, account := newTurnStateTestHandler(t)
+			state, _, err := h.probeCodexTurnState(context.Background(), account, "test", "model", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state != tc.want {
+				t.Errorf("state length=%d, want %d（%s）", len(state), len(tc.want), tc.name)
+			}
+		})
 	}
 }
 

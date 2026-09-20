@@ -11,6 +11,16 @@ import (
 	"github.com/codex2api/internal/openaiidentity"
 )
 
+// codexTurnStateIssuedAt 从 token 内嵌的 Fernet 签发时间推导展示值（RFC3339）。
+// 这是 token 的真实寿命起点，与保存进网关的时刻无关；解析不出（存量/非标值）返回空。
+func codexTurnStateIssuedAt(raw string) string {
+	info, err := auth.ParseCodexTurnState(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return info.Issued.Format(time.RFC3339)
+}
+
 func antigravityPersistedStatus(row *database.AccountRow) (string, string) {
 	if row == nil {
 		return "error", "账号不存在"
@@ -267,6 +277,7 @@ func (h *Handler) buildAccountResponse(
 		CodexTurnState:               strings.TrimSpace(row.GetCredential(auth.CodexTurnStateCredentialKey)),
 		CodexTurnStateModels:         auth.NormalizeCodexTurnStateModels(row.GetCredential(auth.CodexTurnStateModelsCredentialKey)),
 		CodexTurnStateSetAt:          strings.TrimSpace(row.GetCredential(auth.CodexTurnStateSetAtCredentialKey)),
+		CodexTurnStateIssuedAt:       codexTurnStateIssuedAt(row.GetCredential(auth.CodexTurnStateCredentialKey)),
 		CodexTurnStateRefreshEnabled: strings.TrimSpace(row.GetCredential(auth.CodexTurnStateRefreshEnabledCredentialKey)),
 		CodexTurnStateRefreshProxy:   strings.TrimSpace(row.GetCredential(auth.CodexTurnStateRefreshProxyCredentialKey)),
 		CodexTurnStateRefineEnabled:  strings.TrimSpace(row.GetCredential(auth.CodexTurnStateRefineEnabledCredentialKey)),

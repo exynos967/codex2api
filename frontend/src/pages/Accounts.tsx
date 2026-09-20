@@ -112,6 +112,7 @@ import {
   applyWorkspaceRouteHeader,
 } from "../lib/workspaceRoute";
 import { useCodexTurnStateEditor } from "../hooks/useCodexTurnStateEditor";
+import { formatCodexTurnStateIssued } from "../lib/codexTurnState";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10006,6 +10007,31 @@ export default function Accounts() {
                               <p id="edit-codex-turn-state-policy" className="mt-1.5 text-xs text-muted-foreground">
                                 {t("accounts.codexTurnStatePersistenceHint")}
                               </p>
+                              {(() => {
+                                const issued =
+                                  turnStateDraft.savedValue !== ""
+                                    ? formatCodexTurnStateIssued(
+                                        editingAccountLive?.codex_turn_state_issued_at,
+                                      )
+                                    : null;
+                                if (!issued) return null;
+                                return (
+                                  <p
+                                    className={`mt-1 text-xs ${
+                                      issued.nearRefresh
+                                        ? "text-amber-500"
+                                        : "text-muted-foreground"
+                                    }`}
+                                  >
+                                    {t("accounts.codexTurnStateIssuedAt", {
+                                      time: issued.text,
+                                    })}
+                                    {issued.nearRefresh
+                                      ? ` · ${t("accounts.codexTurnStateIssuedNearRefresh")}`
+                                      : null}
+                                  </p>
+                                );
+                              })()}
                             </div>
                             <div className="mt-3">
                               <label className="block text-sm font-semibold text-muted-foreground mb-2">

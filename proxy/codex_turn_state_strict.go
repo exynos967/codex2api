@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/tidwall/gjson"
@@ -42,7 +43,7 @@ func executeWithCodex292Gate(ctx context.Context, account *auth.Account, proxyOv
 	}
 	pinned, _, _ := account.CodexTurnStateConfig()
 	token := ""
-	if len(strings.TrimSpace(pinned)) == auth.CodexTurnStateGoodLength {
+	if auth.IsCodexTurnStateGood(pinned) && !auth.CodexTurnStateExpiredByIssue(pinned, time.Now()) {
 		token = strings.TrimSpace(pinned)
 	}
 	for {
@@ -108,7 +109,7 @@ func executeWithCodex292Gate(ctx context.Context, account *auth.Account, proxyOv
 		if err != nil {
 			return nil, errCodex292Gate("强制292刷新未完成，未转发被拦截响应", err)
 		}
-		if len(strings.TrimSpace(token)) != auth.CodexTurnStateGoodLength {
+		if !auth.IsCodexTurnStateGood(token) {
 			return nil, errCodex292Gate("强制292刷新返回未验证状态", nil)
 		}
 		// 再发一次原请求，由新响应自己的头/帧重新验证；新token不能给旧响应背书。

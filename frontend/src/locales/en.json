@@ -1731,6 +1731,8 @@
     "codexTurnStateTitle": "Turn State forced injection",
     "codexTurnStateHint": "Force this X-Codex-Turn-State value onto outbound Codex requests for this account (HTTP and WebSocket), taking precedence over client values and custom headers. Clear and save to disable.",
     "codexTurnStatePersistenceHint": "Pinned 292 Turn-State values are retained without time-based expiry. Newly pinned values fill this field automatically; unsaved manual edits are preserved.",
+    "codexTurnStateIssuedAt": "Issued at {{time}} · ~1 hour lifetime (embedded in token, not save time)",
+    "codexTurnStateIssuedNearRefresh": "approaching the early-refresh window",
     "codexTurnStateRequire292Label": "Require 292 Turn-State for all requests",
     "codexTurnStateRequire292Hint": "Block 312 responses, refresh and retry; release only verified 292 responses. Missing or unknown states fail closed. WS waits for full-response verification (up to 32 MiB). Waiting can be cancelled. Takes effect after saving.",
     "codexTurnStateValueLabel": "Injected value",

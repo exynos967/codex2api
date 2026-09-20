@@ -35,14 +35,14 @@ func verifyCodex292Response(ctx context.Context, resp *http.Response, websocket 
 		if len(values) != 1 {
 			return false, errors.New("codex 292 response header missing or ambiguous")
 		}
-		length := len(observedCodexTurnState(values[0]))
-		switch length {
-		case auth.CodexTurnStateGoodLength:
+		class, _ := auth.ClassifyCodexTurnState(observedCodexTurnState(values[0]))
+		switch class {
+		case auth.CodexTurnStateClassGood:
 			return true, nil
-		case auth.CodexTurnStateDegradedLength:
+		case auth.CodexTurnStateClassDegraded:
 			return false, nil
 		default:
-			return false, fmt.Errorf("codex 292 response state length %d", length)
+			return false, fmt.Errorf("codex 292 response state length %d", len(observedCodexTurnState(values[0])))
 		}
 	}
 	if resp.Body == nil {
@@ -151,11 +151,12 @@ func verifyCodex292Response(ctx context.Context, resp *http.Response, websocket 
 				return false, stateErr
 			}
 			if state != "" {
-				switch len(state) {
-				case auth.CodexTurnStateGoodLength:
+				class, _ := auth.ClassifyCodexTurnState(state)
+				switch class {
+				case auth.CodexTurnStateClassGood:
 					saw292 = true
 					verifiedState = state
-				case auth.CodexTurnStateDegradedLength:
+				case auth.CodexTurnStateClassDegraded:
 					if !preserveContinuation {
 						return false, nil
 					}
@@ -226,16 +227,17 @@ func codex292FrameStateConflict(payload []byte) (degraded bool, err error) {
 			if !strings.EqualFold(key.String(), codexTurnStateHeader) {
 				return true
 			}
-			length := 0
+			state := ""
 			if value.Type == gjson.String {
-				length = len(observedCodexTurnState(value.String()))
+				state = observedCodexTurnState(value.String())
 			}
-			switch length {
-			case auth.CodexTurnStateDegradedLength:
+			class, _ := auth.ClassifyCodexTurnState(state)
+			switch class {
+			case auth.CodexTurnStateClassDegraded:
 				degraded = true
-			case auth.CodexTurnStateGoodLength:
+			case auth.CodexTurnStateClassGood:
 			default:
-				err = fmt.Errorf("codex 292 response state length %d", length)
+				err = fmt.Errorf("codex 292 response state length %d", len(state))
 			}
 			return true
 		})
